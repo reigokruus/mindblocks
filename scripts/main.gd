@@ -1,5 +1,5 @@
 extends Node3D
-## Spatial Notes – post-it notes floating in 3D space.
+## Mindblocks – notes as cubes floating in 3D space.
 ##
 ## Everything (environment, camera, UI) is built in code so the scene file
 ## stays tiny and the whole app can be read top to bottom in this script.
@@ -8,6 +8,8 @@ const NoteScript := preload("res://scripts/note.gd")
 const CameraRigScript := preload("res://scripts/camera_rig.gd")
 
 const SAVE_PATH := "user://notes.json"
+## The app used to be called Spatial Notes; its save sits in that name's user:// folder.
+const OLD_APP_NAME := "Spatial Notes"
 const AUTOSAVE_DELAY := 1.0
 const BG_COLOR := Color(0.08, 0.09, 0.11)
 ## Depth guides: a floor grid, with a drop line and a footprint ring under every note.
@@ -1445,14 +1447,17 @@ func _set_note_color(n: NoteScript, c: Color) -> void:
 	_mark_dirty()
 
 
+## First launch: a row of linked blocks, read left to right, low enough to clear the help panel.
 func _create_welcome_notes() -> void:
-	var a := _create_note(Vector3(0, 1.5, 0),
-		"Welcome to Spatial Notes!\n\nDouble-click empty space to add a note.", palette[0])
-	var b := _create_note(Vector3(3.5, -0.5, -2),
-		"Drag notes around. Scroll while dragging to pull them closer or push them deeper.", palette[2])
-	var c := _create_note(Vector3(-3.5, -1, 1.5),
-		"Select a note, then Shift+click another to link them.", palette[3])
-	links = [[a.id, b.id], [a.id, c.id]]
+	var a := _create_note(Vector3(-4.8, -2.4, 0),
+		"Welcome to Mindblocks!\n\nEvery block is a note. Move the mouse to look around.", palette[0])
+	var b := _create_note(Vector3(-1.6, -2.4, 0),
+		"Double-click empty space to make a block.\n\nDouble-click a block to write on it.", palette[2])
+	var c := _create_note(Vector3(1.6, -2.4, 0),
+		"Click a block to select it. Click a + to add a linked block, or drag an arrow to move it.", palette[3])
+	var d := _create_note(Vector3(4.8, -2.4, 0),
+		"Esc frees the mouse.\n\nH shows all the controls.", palette[5])
+	links = [[a.id, b.id], [b.id, c.id], [c.id, d.id]]
 
 
 # --- Editor -----------------------------------------------------------------
@@ -1654,7 +1659,20 @@ func _save() -> void:
 	dirty = false
 
 
+## Copies the save from the old app name's folder, once, if there's none here yet.
+func _migrate_old_save() -> void:
+	if FileAccess.file_exists(SAVE_PATH):
+		return
+	var old := OS.get_user_data_dir().get_base_dir().path_join(OLD_APP_NAME).path_join("notes.json")
+	if not FileAccess.file_exists(old):
+		return
+	var err := DirAccess.copy_absolute(old, ProjectSettings.globalize_path(SAVE_PATH))
+	if err != OK:
+		push_warning("Could not copy notes from %s: %s" % [old, error_string(err)])
+
+
 func _load() -> bool:
+	_migrate_old_save()
 	if not FileAccess.file_exists(SAVE_PATH):
 		return false
 	var data = JSON.parse_string(FileAccess.get_file_as_string(SAVE_PATH))

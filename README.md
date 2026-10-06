@@ -1,6 +1,6 @@
-# Spatial Notes
+# Mindblocks
 
-Post-it notes floating in 3D space. A small Godot 4 starter project for
+Notes as cubes floating in 3D space. A small Godot 4 starter project for
 thinking through big ideas spatially.
 
 ## Open it
@@ -48,11 +48,19 @@ Closing the editor on an empty note deletes it.
 
 ## Where your notes live
 
-Everything autosaves to `user://notes.json`. On Linux that's:
+Everything autosaves to `user://notes.json`. That's:
 
 ```
-~/.local/share/godot/app_userdata/Spatial Notes/notes.json
+Linux:   ~/.local/share/godot/app_userdata/Mindblocks/notes.json
+macOS:   ~/Library/Application Support/Godot/app_userdata/Mindblocks/notes.json
+Windows: %APPDATA%\Godot\app_userdata\Mindblocks\notes.json
 ```
+
+The app used to be called Spatial Notes. If there's no Mindblocks save yet but
+there is one in the old `Spatial Notes` folder next to it, it's copied over on
+startup (the old file is left alone).
+
+With no save at all, the app starts with four linked blocks explaining the basics.
 
 It's plain JSON: notes (id, text, color, position, status), links (pairs of ids),
 and the camera position.
