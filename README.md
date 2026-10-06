@@ -15,6 +15,8 @@ thinking through big ideas spatially.
 |---|---|
 | Look around | Move the mouse (clicks act at the crosshair) |
 | Pause / free the cursor | Esc; Continue or Esc again to resume |
+| Quit | Esc → Exit (saves first) |
+| Start over | Esc → New notespace → Delete and start new: clears all blocks and links and brings back the first-run blocks and starting view (Ctrl+Z brings the old notespace back) |
 | New note | Double-click empty space |
 | New linked cube next to another | Click a cube, then click the + off one of its faces (it lands directly beside that face; faces with a cube already against them have no +) |
 | Edit note | Double-click it, or select + Enter |

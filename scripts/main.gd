@@ -102,7 +102,7 @@ const TOAST_LIFE := 2.5
 const UNDO_MOVE_TIME := 0.25
 
 const HELP_TEXT := """Mouse — look around · clicks act at the crosshair
-Esc — pause and free the cursor
+Esc — pause and free the cursor · the pause menu has New notespace (start over) and Exit
 Double-click empty space — new note · click a cube, then + on a face — new linked cube there
 Double-click a note / Enter — edit it
 Hold click on a note — carry it (scroll while carrying: nearer / farther)
@@ -194,6 +194,8 @@ var editing: NoteScript = null
 var mark_done_btn: Button
 var mark_failed_btn: Button
 var pause_panel: Control
+var pause_buttons: Control  # Continue / New notespace
+var new_confirm: Control  # "Start a new notespace?" with its two buttons
 var crosshair: Control
 var paused := false
 
@@ -440,7 +442,44 @@ func _build_ui() -> void:
 	continue_btn.text = "Continue"
 	continue_btn.custom_minimum_size = Vector2(200, 40)
 	continue_btn.pressed.connect(_set_paused.bind(false))
-	menu_box.add_child(continue_btn)
+	var new_btn := Button.new()
+	new_btn.text = "New notespace"
+	new_btn.custom_minimum_size = Vector2(200, 40)
+	new_btn.pressed.connect(_show_new_confirm.bind(true))
+	var exit_btn := Button.new()
+	exit_btn.text = "Exit"
+	exit_btn.custom_minimum_size = Vector2(200, 40)
+	exit_btn.pressed.connect(_exit)
+	var buttons := VBoxContainer.new()
+	buttons.add_theme_constant_override("separation", 10)
+	buttons.add_child(continue_btn)
+	buttons.add_child(new_btn)
+	buttons.add_child(exit_btn)
+	pause_buttons = buttons
+	menu_box.add_child(buttons)
+	# Starting a new notespace asks first, in place of the buttons above.
+	var confirm := VBoxContainer.new()
+	confirm.add_theme_constant_override("separation", 10)
+	confirm.visible = false
+	var question := Label.new()
+	question.text = "Start a new notespace?\nThis deletes all current blocks."
+	question.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	confirm.add_child(question)
+	var confirm_row := HBoxContainer.new()
+	confirm_row.add_theme_constant_override("separation", 10)
+	var yes_btn := Button.new()
+	yes_btn.text = "Delete and start new"
+	yes_btn.custom_minimum_size = Vector2(0, 40)
+	yes_btn.pressed.connect(_new_notespace)
+	confirm_row.add_child(yes_btn)
+	var cancel_btn := Button.new()
+	cancel_btn.text = "Cancel"
+	cancel_btn.custom_minimum_size = Vector2(100, 40)
+	cancel_btn.pressed.connect(_show_new_confirm.bind(false))
+	confirm_row.add_child(cancel_btn)
+	confirm.add_child(confirm_row)
+	new_confirm = confirm
+	menu_box.add_child(confirm)
 
 
 func _panel_style(bg: Color, radius: int) -> StyleBoxFlat:
@@ -1448,16 +1487,56 @@ func _set_note_color(n: NoteScript, c: Color) -> void:
 
 
 ## First launch: a row of linked blocks, read left to right, low enough to clear the help panel.
+## They sit exactly as far apart as snapping places cubes, so touching one doesn't make it jump.
 func _create_welcome_notes() -> void:
-	var a := _create_note(Vector3(-4.8, -2.4, 0),
+	var x := -1.5 * PLUS_NEW_OFFSET
+	var a := _create_note(Vector3(x, -2.4, 0),
 		"Welcome to Mindblocks!\n\nEvery block is a note. Move the mouse to look around.", palette[0])
-	var b := _create_note(Vector3(-1.6, -2.4, 0),
+	var b := _create_note(Vector3(x + PLUS_NEW_OFFSET, -2.4, 0),
 		"Double-click empty space to make a block.\n\nDouble-click a block to write on it.", palette[2])
-	var c := _create_note(Vector3(1.6, -2.4, 0),
+	var c := _create_note(Vector3(x + 2 * PLUS_NEW_OFFSET, -2.4, 0),
 		"Click a block to select it. Click a + to add a linked block, or drag an arrow to move it.", palette[3])
-	var d := _create_note(Vector3(4.8, -2.4, 0),
+	var d := _create_note(Vector3(x + 3 * PLUS_NEW_OFFSET, -2.4, 0),
 		"Esc frees the mouse.\n\nH shows all the controls.", palette[5])
 	links = [[a.id, b.id], [b.id, c.id], [c.id, d.id]]
+
+
+## Pause menu: swaps the Continue / New notespace buttons for the "are you sure?" step.
+func _show_new_confirm(on: bool) -> void:
+	pause_buttons.visible = not on
+	new_confirm.visible = on
+
+
+## Pause menu Exit: saves and quits.
+func _exit() -> void:
+	_save()
+	get_tree().quit()
+
+
+## Clears every block and link and starts over with the first-run blocks and
+## the starting view. The old notespace is one undo step ("new notespace").
+## Ids keep counting up, so undo can bring the old blocks back without clashes.
+func _new_notespace() -> void:
+	_end_drag()
+	_commit_move()
+	_finish_easing()
+	if turn_tween and turn_tween.is_running():
+		turn_tween.kill()
+	_select(null)
+	var entries: Array = []
+	for n in notes.values():
+		entries.append(_delete_record(n))
+	for n in notes.values():
+		_delete_note(n)
+	links.clear()
+	_create_welcome_notes()
+	for n in notes.values():
+		entries.append({"type": "create", "id": n.id})
+	undo_stack.clear()
+	_push_undo({"type": "group", "entries": entries, "label": "new notespace"})
+	rig.reset()
+	_save()
+	_set_paused(false)
 
 
 # --- Editor -----------------------------------------------------------------
@@ -1623,6 +1702,7 @@ func _drop_toast(l: Label) -> void:
 func _set_paused(on: bool) -> void:
 	paused = on
 	pause_panel.visible = on
+	_show_new_confirm(false)
 	if on:
 		_end_drag()
 		orbiting = false

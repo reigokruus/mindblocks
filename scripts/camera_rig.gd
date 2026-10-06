@@ -10,9 +10,14 @@ const PAN_SPEED := 0.0016
 const LOOK_SPEED := 0.0025
 
 var camera: Camera3D
-var yaw := 0.0
-var pitch := -0.25
-var distance := 9.0
+## Where the view starts, and where reset() puts it back.
+const START_YAW := 0.0
+const START_PITCH := -0.25
+const START_DISTANCE := 9.0
+
+var yaw := START_YAW
+var pitch := START_PITCH
+var distance := START_DISTANCE
 ## Set by main while a text field has focus, so typing doesn't fly the camera.
 var input_blocked := false
 
@@ -91,6 +96,14 @@ func _process(delta: float) -> void:
 	if Input.is_key_pressed(KEY_SHIFT):
 		speed *= 3.0
 	position += dir.normalized() * speed * delta
+
+
+func reset() -> void:
+	position = Vector3.ZERO
+	yaw = START_YAW
+	pitch = START_PITCH
+	distance = START_DISTANCE
+	_apply()
 
 
 func to_dict() -> Dictionary:
