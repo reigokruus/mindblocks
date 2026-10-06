@@ -46,7 +46,7 @@ On macOS, use Cmd wherever this says Ctrl (Cmd+Z, Cmd+C, Cmd+Enter…); the in-a
 | Fly | W A S D, Q / E for down / up, Shift = faster |
 | Fly up / down | Space or E / Q |
 | Toggle floor guides | G |
-| Toggle help | H |
+| Toggle help | H (hidden at start; a small "H to toggle help" note bottom left is always shown) |
 
 Closing the editor on an empty note deletes it.
 

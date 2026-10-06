@@ -125,7 +125,7 @@ Right-drag — orbit · Middle-drag or Shift+right-drag — pan
 Scroll — zoom · W A S D / Q E — fly (Shift = faster)
 Space — fly up
 G — floor guides on / off
-H — hide this help · saves automatically"""
+H — show / hide this help · saves automatically"""
 
 var palette: Array[Color] = [
 	Color("ffe680"),  # yellow
@@ -326,9 +326,10 @@ func _build_ui() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
 
-	# Help overlay (top-left)
+	# Help overlay (top-left), hidden until H is pressed
 	help_panel = PanelContainer.new()
 	help_panel.position = Vector2(16, 16)
+	help_panel.visible = false
 	help_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	help_panel.add_theme_stylebox_override("panel", _panel_style(Color(0, 0, 0, 0.55), 8))
 	var help_label := Label.new()
@@ -337,6 +338,22 @@ func _build_ui() -> void:
 	help_label.add_theme_color_override("font_color", Color(0.9, 0.9, 0.92))
 	help_panel.add_child(help_label)
 	layer.add_child(help_panel)
+
+	# Always-on hint (bottom-left), styled like the undo messages
+	var hint := Label.new()
+	hint.text = "H to toggle help"
+	hint.add_theme_font_size_override("font_size", 15)
+	var hint_style := _panel_style(Color(0, 0, 0, 0.6), 6)
+	hint_style.set_content_margin_all(8)
+	hint.add_theme_stylebox_override("normal", hint_style)
+	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hint.anchor_top = 1.0
+	hint.anchor_bottom = 1.0
+	hint.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	hint.offset_left = 16.0
+	hint.offset_top = -16.0
+	hint.offset_bottom = -16.0
+	layer.add_child(hint)
 
 	# Note editor (bottom-center)
 	editor_panel = PanelContainer.new()
