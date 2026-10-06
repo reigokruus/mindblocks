@@ -11,6 +11,8 @@ thinking through big ideas spatially.
 
 ## Controls
 
+On macOS, use Cmd wherever this says Ctrl (Cmd+Z, Cmd+C, Cmd+Enter…); the in-app help shows Cmd there.
+
 | Action | Input |
 |---|---|
 | Look around | Move the mouse (clicks act at the crosshair) |

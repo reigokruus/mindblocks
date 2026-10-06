@@ -73,8 +73,8 @@ func focus(target: Vector3) -> void:
 func _process(delta: float) -> void:
 	if input_blocked:
 		return
-	# Ctrl is for shortcuts (Ctrl+S, Ctrl+Z), so it never flies the camera.
-	if Input.is_key_pressed(KEY_CTRL):
+	# Ctrl / Cmd is for shortcuts (Ctrl+S, Ctrl+Z), so it never flies the camera.
+	if Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META):
 		return
 	var b := camera.global_transform.basis
 	var dir := Vector3.ZERO

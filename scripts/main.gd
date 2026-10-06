@@ -100,6 +100,14 @@ const TOAST_ROW := 40.0
 const TOAST_MAX := 5
 const TOAST_LIFE := 2.5
 const UNDO_MOVE_TIME := 0.25
+## All 2D UI (help, editor, menu, messages, crosshair) is laid out for a window
+## this size and scaled with the window, so it takes up the same share of it at
+## any size or pixel density. Godot draws the text at the scaled size, so it stays sharp.
+const UI_DESIGN_SIZE := Vector2(1280, 760)
+## In a narrow window the UI shrinks, but never below this much of the
+## screen's own scale (2 on Retina), so text stays readable.
+const UI_SCALE_MIN := 0.75
+const UI_SCALE_MAX := 4.0
 
 const HELP_TEXT := """Mouse — look around · clicks act at the crosshair
 Esc — pause and free the cursor · the pause menu has New notespace (start over) and Exit
@@ -218,6 +226,8 @@ func _ready() -> void:
 	notes_root.name = "Notes"
 	add_child(notes_root)
 	_build_ui()
+	get_window().size_changed.connect(_update_ui_scale)
+	_update_ui_scale()
 	if not _load():
 		_create_welcome_notes()
 		_save()
@@ -322,7 +332,7 @@ func _build_ui() -> void:
 	help_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	help_panel.add_theme_stylebox_override("panel", _panel_style(Color(0, 0, 0, 0.55), 8))
 	var help_label := Label.new()
-	help_label.text = HELP_TEXT
+	help_label.text = _shortcut_text(HELP_TEXT)
 	help_label.add_theme_font_size_override("font_size", 14)
 	help_label.add_theme_color_override("font_color", Color(0.9, 0.9, 0.92))
 	help_panel.add_child(help_label)
@@ -349,7 +359,7 @@ func _build_ui() -> void:
 	editor_panel.add_child(vbox)
 
 	var title := Label.new()
-	title.text = "Edit note   (Ctrl+Enter or Esc to close)"
+	title.text = _shortcut_text("Edit note   (Ctrl+Enter or Esc to close)")
 	vbox.add_child(title)
 
 	editor_text = TextEdit.new()
@@ -480,6 +490,21 @@ func _build_ui() -> void:
 	confirm.add_child(confirm_row)
 	new_confirm = confirm
 	menu_box.add_child(confirm)
+
+
+## Window size is in real pixels (so a Retina screen counts double), which makes
+## this cover pixel density as well as window size.
+func _update_ui_scale() -> void:
+	var w := get_window()
+	var s := Vector2(w.size) / UI_DESIGN_SIZE
+	var lowest := UI_SCALE_MIN * DisplayServer.screen_get_scale(w.current_screen)
+	w.content_scale_factor = clampf(minf(s.x, s.y), lowest, UI_SCALE_MAX)
+
+
+## Shortcuts use Cmd instead of Ctrl on macOS (is_command_or_control_pressed()),
+## so texts that name them say so there.
+func _shortcut_text(t: String) -> String:
+	return t.replace("Ctrl", "Cmd") if OS.has_feature("macos") else t
 
 
 func _panel_style(bg: Color, radius: int) -> StyleBoxFlat:
@@ -638,7 +663,7 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed:
 		var k := event as InputEventKey
 		var is_enter := k.keycode == KEY_ENTER or k.keycode == KEY_KP_ENTER
-		if k.keycode == KEY_ESCAPE or (is_enter and k.ctrl_pressed):
+		if k.keycode == KEY_ESCAPE or (is_enter and k.is_command_or_control_pressed()):
 			_close_editor()
 			get_viewport().set_input_as_handled()
 	elif event is InputEventMouseButton and event.pressed:
@@ -730,17 +755,19 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 
 
 ## A dragged note is carried along by _process(), so it follows any of these.
+## Turning and panning use screen_relative (real pixels), so their speed doesn't
+## change with the UI scale; the gizmo works in UI coordinates like its arrows.
 func _on_mouse_motion(e: InputEventMouseMotion) -> void:
 	if gizmo_axis >= 0:
 		_drag_gizmo(e.relative)
 	elif orbiting:
-		rig.orbit(e.relative)
+		rig.orbit(e.screen_relative)
 	elif panning:
-		rig.pan(e.relative)
+		rig.pan(e.screen_relative)
 	elif Input.is_key_pressed(KEY_R) and (dragging or selected):
-		_rotate_note(dragging if dragging else selected, e.relative)
+		_rotate_note(dragging if dragging else selected, e.screen_relative)
 	elif _mouse_captured():
-		rig.look(e.relative)
+		rig.look(e.screen_relative)
 
 
 ## Trackball-style: moving the mouse turns the cube around the camera's up
@@ -885,24 +912,24 @@ func _on_key(e: InputEventKey) -> void:
 		KEY_H, KEY_F1:
 			help_panel.visible = not help_panel.visible
 		KEY_S:
-			if e.ctrl_pressed:
+			if e.is_command_or_control_pressed():
 				_save()
 		KEY_C:
-			if e.ctrl_pressed and selected:
+			if e.is_command_or_control_pressed() and selected:
 				_copy_selected()
 		KEY_X:
-			if e.ctrl_pressed and selected:
+			if e.is_command_or_control_pressed() and selected:
 				_cut_selected()
 		KEY_V:
-			if e.ctrl_pressed:
+			if e.is_command_or_control_pressed():
 				_paste()
 		KEY_Z:
-			if e.ctrl_pressed and e.shift_pressed:
+			if e.is_command_or_control_pressed() and e.shift_pressed:
 				_redo()
-			elif e.ctrl_pressed:
+			elif e.is_command_or_control_pressed():
 				_undo()
 		KEY_Y:
-			if e.ctrl_pressed:
+			if e.is_command_or_control_pressed():
 				_redo()
 		KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7:
 			var i: int = e.keycode - KEY_1
