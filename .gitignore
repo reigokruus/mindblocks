@@ -1,0 +1,4 @@
+# Godot 4 import cache
+.godot/
+*.tmp
+notes.json
