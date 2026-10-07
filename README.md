@@ -1,7 +1,9 @@
 # Mindblocks
 
-Notes as cubes floating in 3D space. A small Godot 4 starter project for
-thinking through big ideas spatially.
+Notes as cubes floating in 3D space. A small Godot 4 project for thinking
+through big ideas spatially: fly around your notes, link them into stacks that
+move as one, and let Claude break a big task down into blocks or reorganise
+the space for you.
 
 ## Open it
 
@@ -16,7 +18,8 @@ On macOS, use Cmd wherever this says Ctrl (Cmd+Z, Cmd+C, Cmd+Enter…); the in-a
 | Action | Input |
 |---|---|
 | Look around | Move the mouse (clicks act at the crosshair) |
-| Pause / free the cursor | Esc; Continue or Esc again to resume |
+| Read a block | Its text shows on the face turned toward you, always upright, and moves to another face as you fly around |
+| Pause / free the cursor | Esc; Continue or Esc again to resume. The pause menu has ▶️ Continue, 🆕 New notespace, 🧩 Break down a task, ✨ Add with AI, 🧭 Arrange notes around me and 🚪 Exit |
 | Quit | Esc → Exit (saves first) |
 | Start over | Esc → New notespace → Delete and start new: clears all blocks and links and brings back the first-run blocks and starting view (Ctrl+Z brings the old notespace back) |
 | New note | Double-click empty space |
@@ -33,22 +36,23 @@ On macOS, use Cmd wherever this says Ctrl (Cmd+Z, Cmd+C, Cmd+Enter…); the in-a
 | Turn a cube 90° | Arrow keys (selected cube) |
 | Straighten a cube | Double-tap R (upright and lined up with the grid; position stays) |
 | Link / unlink two notes | Select one, Shift+click the other (a click sounds; a lower one for unlinking) |
-| Anchor blocks | An anchor (thick dark frame) carries every block linked to it, directly or through other blocks, when you move it, so linked stacks move as one, wobbling a little on the way and settling exactly where you put them; Ctrl+Z puts them all back. Toggle Anchor in the editor. AI group titles start as anchors |
+| Anchor blocks | An anchor (thick dark frame) carries every block linked to it, directly or through other blocks, when you move it, so linked stacks move as one, wobbling a little on the way and settling exactly where you put them; Ctrl+Z puts them all back. Toggle Anchor in the editor. AI group titles start as anchors. An anchor only turns left / right (R + mouse, ← / →, R R to straighten), and its whole stack swings round with it, keeping its shape (one undo step) |
 | Recolor selected | 1–7 |
 | Focus camera on selected | F |
 | Delete selected | Delete / Backspace |
 | Copy a cube by dragging | Hold Alt and drag a cube (or one of its arrows): a copy comes with you, the original stays |
 | Copy / cut / paste | Ctrl+C or Ctrl+X on a selected cube, Ctrl+V pastes it where you're looking (a cut cube keeps its links on its first paste) |
-| Undo | Ctrl+Z: undoes deletes, moves, rotations, new / copied / pasted / cut cubes, and text, color and mark edits (last 50 steps); a message top right says what was undone |
+| Undo | Ctrl+Z: undoes deletes, moves, rotations, new / copied / pasted / cut cubes, text, color, mark and anchor edits, stack moves and turns, arranging, and each AI breakdown or AI edit as a whole (last 50 steps); a message top right says what was undone |
 | Redo | Ctrl+Y or Ctrl+Shift+Z (cleared once you do something new) |
 | Orbit | Right-drag |
 | Pan | Middle-drag or Shift+right-drag |
 | Zoom | Scroll while orbiting (right-drag); scrolling while just flying does nothing |
-| Fly | W A S D, Q / E for down / up, Shift = much faster |
+| Fly | W A S D, Q / E for down / up (18 units/s), Shift = much faster (43) |
 | Fly up / down | Space or E / Q |
+| Arrange notes around me | O, or Esc → Arrange notes around me: every stack (blocks connected by links; a lone block counts as one) goes on one circle round you at eye level, equally spaced (360° / number of stacks), the first straight ahead, in the order they already were around you. The circle is big enough for each stack to be seen whole and for neighbours to stay apart. Long stacks are turned so you see their full width. Doing it again without moving changes nothing. You stay where you are; Ctrl+Z puts everything back |
 | Toggle floor guides | G |
 | Break down a task with AI | B, or Esc → Break down a task: describe a big task, and Claude lays it out as linked blocks in a new notespace (groups of tasks, each with its subtasks around it). If there are blocks already, it asks before erasing them. Ctrl+Enter generates; Ctrl+Z brings the old blocks back. Needs an Anthropic API key, see below |
-| Add or change blocks with AI | Shift+B, or Esc → Add with AI: say what to add or change, and Claude adds, rewrites, links / unlinks, marks, recolors or removes blocks in the current space. New blocks branch out from the block they belong under; changed ones pulse. Ctrl+Z undoes it all in one step |
+| Add or change blocks with AI | Shift+B, or Esc → Add with AI: say what to add or change, and Claude adds, rewrites, links / unlinks, marks, recolors, removes, moves or rearranges blocks and whole stacks in the current space (e.g. "organise this", "put the marketing stuff next to Shop"). New blocks branch out from the block they belong under; changed ones pulse. Ctrl+Z undoes it all in one step |
 | Toggle help | H (hidden at start; a small "H to toggle help" note bottom left is always shown) |
 
 Closing the editor on an empty note deletes it.
@@ -94,10 +98,23 @@ changes: new blocks (each under a parent block, or as a new group), rewritten
 texts, done / failed marks, colors, new or removed links, and removed blocks.
 A new block branches out from its parent the same way, away from the block
 the parent hangs from, into the most open space nearby. A new group gets its
-own spot in front of you, clear of everything else. Ids that don't match a block are
-skipped. Everything is one undo step, and a message says what changed.
+own spot in front of you, clear of everything else.
 
-Both need an Anthropic API key. If `ANTHROPIC_API_KEY` is set, that one is used.
+Add with AI can also reorganise the space. Claude says where things go
+relative to each other, and the app works out the exact positions:
+- **move** puts one block on a side (left / right / above / below / front /
+  behind, as you see it) of another block.
+- **move_stack** moves a whole stack (everything linked to a block) next to
+  another block or stack, or into free space in front of you.
+- **arrange** lays a stack out again as a tidy 3D mind map around its anchor,
+  which stays put.
+
+Moved blocks keep clear of everything else (stacks by 4 units) and fly to their
+new places with a small overshoot. Ids that don't match a block are skipped. Everything is one undo step, and messages show Claude's one-line summary and what changed (e.g. "Moved blocks around (7)").
+
+Both need an Anthropic API key (create one in the Claude Console under
+Settings → API Keys; the API is billed separately from a Claude.ai plan, so the
+account needs some credit). If `ANTHROPIC_API_KEY` is set, that one is used.
 Otherwise the panel asks for one once and keeps it in `user://settings.cfg` (in
 the same folder as `notes.json`, never in the notes or the repo). Delete that
 file to forget the key. A key the API rejects is forgotten automatically.
@@ -170,7 +187,7 @@ A few design decisions worth knowing before you change things:
   works as a mouse.
 - **Search:** type to highlight matching notes and fly to them.
 - **Multiple spaces:** one JSON file per subject, with a switcher.
-- **Groups / clusters:** a translucent box or sphere you can drop notes into
-  and move together.
+- **Visible clusters:** anchors already move linked stacks together; a faint
+  translucent hull around each stack would show where one ends.
 - **Richer notes:** images, or Markdown via `RichTextLabel` in a `SubViewport`.
 - **Export:** Android and Web exports work with the Compatibility renderer.

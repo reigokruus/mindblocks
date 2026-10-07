@@ -132,10 +132,15 @@ Each block is a small cube with a few words on it, so keep every text short enou
 Group related work together: 2-6 groups, each with a short title and 2-6 tasks, and each task with 0-4 concrete subtasks.
 Order groups and tasks roughly in the order they'd be done. Write in the same language as the request."""
 const AI_EDIT_SYSTEM := """You change a 3D note board where every note is a small cube with a few words on it.
-You get the current blocks (id, text, status, color index, position; y is up) and the links between them, then a request. Make only the changes the request asks for.
+You get the current blocks (id, text, status, color index, whether it's an anchor, and position as seen by the user: x to their right, y up, z toward them, so more negative z is farther away) and the links between them, then a request. Make only the changes the request asks for, but when someone seems stuck or asks to organise things, rearranging the board into meaningful clusters is welcome.
 New blocks: give each a temp_id like "n1" and a parent: the id or temp_id of the most related block it belongs under (a task under its group's title block, a subtask under its task), or "" for a new top-level group. List parents before their children. Every new block is linked to its parent automatically, so don't also list those links.
 Keep every text short enough to fit on a cube face: at most 60 characters, no numbering or bullet characters.
 Colors are 0 yellow, 1 pink, 2 blue, 3 green, 4 orange, 5 purple, 6 white; use -1 for a new block to take its parent's color.
+Moving things (the app works out exact positions and keeps blocks apart, so you only say where things go relative to each other):
+- move: one block next to another block ("near" is that block's id), on the given side as the user sees it.
+- move_stack: a whole stack (every block linked to the given block, directly or through others) moves together next to another block or stack ("near"), or with near "" to free space in front of the user. Use this to cluster related groups together or put unrelated ones apart.
+- arrange: tidies a stack into a clean 3D mind map around its anchor (title) block, which stays where it is.
+Only move what's needed, and never invent ids: use only ids from the board or your own temp_ids.
 Use empty lists for kinds of change you don't need. summary: one short sentence on what you changed. Write in the same language as the request."""
 ## AI layouts grow like a 3D mind map, the way blocks look when arranged by
 ## hand: a group's tasks spread out around and below its title block, in all
@@ -167,6 +172,20 @@ const FOLLOW_TILT := 0.02
 const FOLLOW_MAX_TILT := 0.3
 const FOLLOW_SUBSTEPS := 3
 const AI_PULSE := 1.2
+## Add with AI moves: sides Claude can name (as the user sees them), the gap
+## kept around a moved stack, and how long blocks take to fly to their new place.
+const AI_SIDES: Array[String] = ["left", "right", "above", "below", "front", "behind"]
+const AI_STACK_GAP := 4.0
+const AI_MOVE_TIME := 0.7
+## Arrange around me: stacks go on one circle round the viewer at equal angles,
+## the circle big enough for every stack to fit in view (ARRANGE_FILL of the
+## field of view) but no smaller than ARRANGE_MIN_DIST, with neighbouring
+## stacks at least ARRANGE_GAP apart. A stack this many times wider than
+## it is deep is turned to show the viewer its full width.
+const ARRANGE_MIN_DIST := 12.0
+const ARRANGE_FILL := 0.7
+const ARRANGE_GAP := 4.0
+const ARRANGE_LONG := 1.3
 
 const HELP_TEXT := """Mouse — look around · clicks act at the crosshair
 Esc — pause and free the cursor · the pause menu has New notespace, Break down a task, Add with AI and Exit
@@ -176,6 +195,7 @@ Hold click on a note — carry it (scroll while carrying: nearer / farther)
 Drag a colored arrow — move selected cube along that axis
 Moving near another cube shows a ghost: let go to snap there (Shift = don't)
 R + mouse — rotate selected cube · arrow keys — turn it 90° · R R — straighten it
+Anchors only turn left / right, and their whole stack turns with them
 Shift+click another note — link / unlink with selected
 Anchor blocks (thick dark frame) carry every block linked to them when moved · toggle in the editor
 1–7 — recolor selected · F — focus selected · Delete — delete
@@ -184,8 +204,8 @@ Ctrl+Z — undo (blocks, moves, text edits…) · Ctrl+Y or Ctrl+Shift+Z — red
 Right-drag — orbit · Middle-drag or Shift+right-drag — pan
 W A S D / Q E — fly (Shift = much faster) · scroll while orbiting — zoom
 Space — fly up
-G — floor guides on / off
-B — break down a task with Claude into a new notespace · Shift+B — add / change blocks with Claude
+G — floor guides on / off · O — arrange all stacks around you (also in the Esc menu)
+B — break down a task with Claude into a new notespace · Shift+B — add, change or rearrange blocks with Claude
 H — show / hide this help · saves automatically"""
 
 var palette: Array[Color] = [
@@ -547,6 +567,7 @@ func _build_ui() -> void:
 	layer.add_child(pause_panel)
 	# Clicking the dimmed area around the menu also continues.
 	pause_panel.gui_input.connect(_on_pause_backdrop_input)
+	pause_panel.theme = _emoji_theme()
 	var center := CenterContainer.new()
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	pause_panel.add_child(center)
@@ -562,31 +583,39 @@ func _build_ui() -> void:
 	paused_label.add_theme_font_size_override("font_size", 28)
 	menu_box.add_child(paused_label)
 	var continue_btn := Button.new()
-	continue_btn.text = "Continue"
+	continue_btn.text = "▶️  Continue"
 	continue_btn.custom_minimum_size = Vector2(200, 40)
 	continue_btn.pressed.connect(_set_paused.bind(false))
 	var new_btn := Button.new()
-	new_btn.text = "New notespace"
+	new_btn.text = "🆕  New notespace"
 	new_btn.custom_minimum_size = Vector2(200, 40)
 	new_btn.pressed.connect(_show_new_confirm.bind(true))
 	var ai_btn := Button.new()
-	ai_btn.text = "Break down a task"
+	ai_btn.text = "🧩  Break down a task"
 	ai_btn.custom_minimum_size = Vector2(200, 40)
 	ai_btn.pressed.connect(_open_ai_panel.bind("breakdown"))
 	var ai_edit_btn := Button.new()
-	ai_edit_btn.text = "Add with AI"
+	ai_edit_btn.text = "✨  Add with AI"
 	ai_edit_btn.custom_minimum_size = Vector2(200, 40)
 	ai_edit_btn.pressed.connect(_open_ai_panel.bind("edit"))
+	var arrange_btn := Button.new()
+	arrange_btn.text = "🧭  Arrange notes around me"
+	arrange_btn.custom_minimum_size = Vector2(200, 40)
+	arrange_btn.pressed.connect(_arrange_around_me)
 	var exit_btn := Button.new()
-	exit_btn.text = "Exit"
+	exit_btn.text = "🚪  Exit"
 	exit_btn.custom_minimum_size = Vector2(200, 40)
 	exit_btn.pressed.connect(_exit)
 	var buttons := VBoxContainer.new()
 	buttons.add_theme_constant_override("separation", 10)
+	# Labels start with an emoji: left-aligned, so the emoji line up in a column.
+	for b: Button in [continue_btn, new_btn, ai_btn, ai_edit_btn, arrange_btn, exit_btn]:
+		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	buttons.add_child(continue_btn)
 	buttons.add_child(new_btn)
 	buttons.add_child(ai_btn)
 	buttons.add_child(ai_edit_btn)
+	buttons.add_child(arrange_btn)
 	buttons.add_child(exit_btn)
 	pause_buttons = buttons
 	menu_box.add_child(buttons)
@@ -601,12 +630,12 @@ func _build_ui() -> void:
 	var confirm_row := HBoxContainer.new()
 	confirm_row.add_theme_constant_override("separation", 10)
 	var yes_btn := Button.new()
-	yes_btn.text = "Delete and start new"
+	yes_btn.text = "🗑️  Delete and start new"
 	yes_btn.custom_minimum_size = Vector2(0, 40)
 	yes_btn.pressed.connect(_new_notespace)
 	confirm_row.add_child(yes_btn)
 	var cancel_btn := Button.new()
-	cancel_btn.text = "Cancel"
+	cancel_btn.text = "↩️  Cancel"
 	cancel_btn.custom_minimum_size = Vector2(100, 40)
 	cancel_btn.pressed.connect(_show_new_confirm.bind(false))
 	confirm_row.add_child(cancel_btn)
@@ -697,6 +726,18 @@ func _build_ai_panel(layer: CanvasLayer) -> void:
 	confirm.add_child(confirm_row)
 	ai_confirm = confirm
 	vbox.add_child(confirm)
+
+
+## A theme whose font falls back to the system's color emoji font (Godot's
+## built-in font has no emoji), for the pause menu's button icons.
+func _emoji_theme() -> Theme:
+	var emoji := SystemFont.new()
+	emoji.font_names = PackedStringArray(["Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji"])
+	var font: Font = ThemeDB.fallback_font.duplicate()
+	font.fallbacks = [emoji]
+	var theme := Theme.new()
+	theme.default_font = font
+	return theme
 
 
 ## Window size is in real pixels (so a Retina screen counts double), which makes
@@ -1002,15 +1043,27 @@ func _on_mouse_motion(e: InputEventMouseMotion) -> void:
 func _rotate_note(n: NoteScript, relative: Vector2) -> void:
 	if move_start.is_empty():
 		move_start = _move_record(n)
+		if n.anchor and follow.is_empty():
+			move_start["followers"] = _stack_records(n)
+	if n.anchor:
+		# Anchors only turn left / right, taking their stack with them.
+		_turn_stack_by(n, Quaternion(Vector3.UP, relative.x * ROTATE_SPEED))
+		_mark_dirty()
+		return
 	var b := camera.global_transform.basis
 	var q := Quaternion(b.y, relative.x * ROTATE_SPEED) * Quaternion(b.x, relative.y * ROTATE_SPEED)
 	n.quaternion = (q * n.quaternion).normalized()
 	_mark_dirty()
 
 
-## A quarter turn of the selected cube around a camera axis, eased.
+## A quarter turn of the selected cube around a camera axis, eased. An anchor
+## only turns left / right (around the world's up), and its stack turns with it.
 func _turn_selected(axis: Vector3, angle: float) -> void:
 	if selected == null:
+		return
+	if selected.anchor:
+		if absf(axis.dot(camera.global_transform.basis.y)) > 0.5:  # left / right keys
+			_ease_stack_turn(selected, Quaternion(Vector3.UP, angle), "stack rotation")
 		return
 	# Pressed again mid-turn: continue from where the running turn was headed,
 	# so quick presses still add up to exact quarter turns.
@@ -1094,6 +1147,12 @@ func _straighten_selected() -> void:
 	if selected == null or selected.quaternion.is_equal_approx(Quaternion.IDENTITY):
 		return
 	_commit_move()  # close any R-rotation from the first tap
+	if selected.anchor:
+		# Turn the stack back by the anchor's heading; the anchor ends fully straight.
+		var z := selected.global_transform.basis.z
+		var heading := atan2(z.x, z.z)
+		_ease_stack_turn(selected, Quaternion(Vector3.UP, -heading), "stack rotation", true)
+		return
 	if turn_tween and turn_tween.is_running() and turn_note == selected:
 		turn_tween.kill()
 	var record := _move_record(selected)
@@ -1138,6 +1197,8 @@ func _on_key(e: InputEventKey) -> void:
 			grid.visible = guides.visible
 		KEY_B:
 			_open_ai_panel("edit" if e.shift_pressed else "breakdown")
+		KEY_O:
+			_arrange_around_me()
 		KEY_H, KEY_F1:
 			help_panel.visible = not help_panel.visible
 		KEY_S:
@@ -1379,6 +1440,94 @@ func _update_follow(force: bool = false) -> void:
 		follow = {}
 
 
+## Move records for every block in `n`'s stack (for an undo step).
+func _stack_records(n: NoteScript) -> Array:
+	var records: Array = []
+	for m in _stack_of(n):
+		records.append(_move_record(m))
+	return records
+
+
+## Turns anchor `n` by `q` (a turn around the world's up) and its stack with
+## it, around the anchor's center: every block swings round and turns by the
+## same amount, so the stack keeps its shape. While the stack is following
+## the anchor on springs, their target places turn instead.
+func _turn_stack_by(n: NoteScript, q: Quaternion, members: Array = []) -> void:
+	var pivot := n.global_position
+	n.quaternion = (q * n.quaternion).normalized()
+	if not follow.is_empty() and follow["anchor"] == n:
+		for m in follow["offsets"]:
+			follow["offsets"][m] = q * follow["offsets"][m]
+			follow["springs"][m]["rot"] = (q * follow["springs"][m]["rot"]).normalized()
+		return
+	if members.is_empty():
+		members = _stack_of(n).keys()
+	for m in members:
+		if is_instance_valid(m) and notes.has(m.id):
+			m.global_position = pivot + q * (m.global_position - pivot)
+			m.quaternion = (q * m.quaternion).normalized()
+
+
+## Eases anchor `n`'s stack through the turn `q` (one undo step, `label`).
+## With `straighten`, the anchor itself ends at no rotation at all.
+func _ease_stack_turn(n: NoteScript, q: Quaternion, label: String, straighten: bool = false) -> void:
+	if turn_tween and turn_tween.is_running():
+		turn_tween.custom_step(TURN_TIME)  # land a turn still running first
+	var members: Array = _stack_of(n).keys()
+	var entries: Array = [_move_record(n)]
+	for m in members:
+		entries.append(_move_record(m))
+	_push_undo({"type": "group", "entries": entries, "label": label})
+	var done := [Quaternion.IDENTITY]  # how much of the turn is applied so far
+	var start_rot := n.quaternion
+	turn_note = n
+	turn_tween = n.create_tween()
+	turn_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	turn_tween.tween_method(func(t: float):
+		if not is_instance_valid(n) or not notes.has(n.id):
+			return
+		var now := Quaternion.IDENTITY.slerp(q, t)
+		_turn_stack_by(n, (now * done[0].inverse()).normalized(), members)
+		done[0] = now
+		if straighten:
+			n.quaternion = start_rot.slerp(Quaternion.IDENTITY, t), 0.0, 1.0, TURN_TIME)
+	turn_tween.finished.connect(func():
+		if is_instance_valid(n) and notes.has(n.id):
+			_unoverlap_stack(n)
+		_mark_dirty())
+
+
+## If any block of `n`'s stack ended up too close to a block outside it,
+## eases the whole stack clear.
+func _unoverlap_stack(n: NoteScript) -> void:
+	var members: Array[NoteScript] = [n]
+	members.append_array(_stack_of(n).keys())
+	var inside := {}
+	for m in members:
+		inside[m] = true
+	var shift := Vector3.ZERO
+	for iteration in 30:
+		var moved := false
+		for m in members:
+			var p := m.global_position + shift
+			for v in notes.values():
+				if inside.has(v):
+					continue
+				var away := p - (v as NoteScript).global_position
+				var dist := away.length()
+				if dist >= SPACING - 0.01:
+					continue
+				if dist < 0.01:
+					away = camera.global_transform.basis.x
+				shift += away.normalized() * (SPACING - dist)
+				moved = true
+		if not moved:
+			break
+	if shift.length() > 0.001:
+		for m in members:
+			_ease_note(m, m.global_position + shift, m.quaternion, SETTLE_TIME)
+
+
 func _following(n: NoteScript) -> bool:
 	return not follow.is_empty() and follow["offsets"].has(n)
 
@@ -1528,6 +1677,11 @@ func _commit_move() -> void:
 	if n and not followers.is_empty() and not n.global_position.is_equal_approx(move_start["pos"]):
 		# An anchor carried its stack: one step puts every block back.
 		_push_undo({"type": "group", "entries": [move_start] + followers, "label": "stack move"})
+	elif n and not followers.is_empty() and not n.quaternion.is_equal_approx(move_start["rot"]):
+		# An anchor turned its stack (R + mouse).
+		_push_undo({"type": "group", "entries": [move_start] + followers, "label": "stack rotation"})
+		if follow.is_empty():
+			_unoverlap_stack(n)
 	elif n and not n.global_position.is_equal_approx(move_start["pos"]):
 		move_start["label"] = "block move"
 		_push_undo(move_start)
@@ -1617,9 +1771,11 @@ func _apply_history(d: Dictionary) -> Dictionary:
 
 
 ## Eases cube `n` to a place and rotation, remembering it in `easing`.
-func _ease_note(n: NoteScript, pos: Vector3, rot: Quaternion, time: float) -> Tween:
+## TRANS_BACK overshoots a little before settling.
+func _ease_note(n: NoteScript, pos: Vector3, rot: Quaternion, time: float,
+		trans: Tween.TransitionType = Tween.TRANS_CUBIC) -> Tween:
 	var tween := n.create_tween().set_parallel()
-	tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tween.set_trans(trans).set_ease(Tween.EASE_OUT)
 	tween.tween_property(n, "global_position", pos, time)
 	tween.tween_property(n, "quaternion", rot, time)
 	tween.finished.connect(_mark_dirty)
@@ -1631,6 +1787,8 @@ func _ease_note(n: NoteScript, pos: Vector3, rot: Quaternion, time: float) -> Tw
 ## Jumps any cube that's still easing to where it's headed, so the next undo /
 ## redo starts from (and records) the right place.
 func _finish_easing() -> void:
+	if turn_tween and turn_tween.is_running():
+		turn_tween.custom_step(TURN_TIME)  # an eased turn (of a block or a stack) lands first
 	for e in easing:
 		var tween: Tween = e["tween"]
 		if tween.is_running() and is_instance_valid(e["note"]):
@@ -1954,6 +2112,144 @@ func _show_new_confirm(on: bool) -> void:
 	new_confirm.visible = on
 
 
+## Every group of blocks connected by links (a lone block is a group of its own).
+func _components() -> Array:
+	var groups: Array = []
+	var seen := {}
+	var ids: Array = notes.keys()
+	ids.sort()
+	for id in ids:
+		var n: NoteScript = notes[id]
+		if seen.has(n):
+			continue
+		var group: Array[NoteScript] = [n]
+		group.append_array(_stack_of(n).keys())
+		for m in group:
+			seen[m] = true
+		groups.append(group)
+	return groups
+
+
+## Esc menu / O: puts every stack on one circle round the viewer at eye level,
+## at equal angles (360° / number of stacks), the first straight ahead, in the
+## order they're already in around the viewer. Each stack's middle sits on the
+## circle, at eye height; a long stack is turned
+## (around the vertical, keeping its shape) so its full width faces the viewer.
+## The circle is big enough for every stack to be seen whole and for
+## neighbours to stay ARRANGE_GAP apart. Doing it again without moving changes
+## nothing. The camera stays put; one undo step puts everything back.
+func _arrange_around_me() -> void:
+	if paused:
+		_set_paused(false)
+	_end_drag()
+	_commit_move()
+	_finish_easing()
+	if notes.is_empty():
+		_toast("Nothing to arrange")
+		return
+	var eye := camera.global_position
+	var flat := Basis(Vector3.UP, rig.yaw)
+	var fwd := -flat.z
+	var right := flat.x
+	var vfov := deg_to_rad(camera.fov) * ARRANGE_FILL
+	var aspect := get_viewport().get_visible_rect().size.aspect()
+	var hfov := 2.0 * atan(tan(deg_to_rad(camera.fov) * 0.5) * aspect) * ARRANGE_FILL
+	var stacks: Array = []
+	for group in _components():
+		var mean := Vector3.ZERO
+		for m in group:
+			mean += m.global_position
+		mean /= group.size()
+		# The main direction the stack spreads in on the floor.
+		var sxx := 0.0
+		var szz := 0.0
+		var sxz := 0.0
+		var ylo := INF
+		var yhi := -INF
+		for m in group:
+			var d: Vector3 = m.global_position - mean
+			sxx += d.x * d.x
+			szz += d.z * d.z
+			sxz += d.x * d.z
+			ylo = minf(ylo, m.global_position.y)
+			yhi = maxf(yhi, m.global_position.y)
+		var theta := 0.5 * atan2(2.0 * sxz, sxx - szz)
+		var axis := Vector3(cos(theta), 0, sin(theta))
+		var across := Vector3(-axis.z, 0, axis.x)
+		var lo := Vector2(INF, INF)
+		var hi := Vector2(-INF, -INF)
+		for m in group:
+			var d: Vector3 = m.global_position - mean
+			lo = lo.min(Vector2(d.dot(axis), d.dot(across)))
+			hi = hi.max(Vector2(d.dot(axis), d.dot(across)))
+		var long := hi.x - lo.x > (hi.y - lo.y + NoteScript.SIZE) * ARRANGE_LONG
+		# The stack's middle (of its extent) is what goes on the circle.
+		var center := mean + axis * (lo.x + hi.x) * 0.5 + across * (lo.y + hi.y) * 0.5
+		center.y = (ylo + yhi) * 0.5
+		var reach := NoteScript.SIZE  # farthest any block is from the middle, sideways
+		for m in group:
+			var o: Vector3 = m.global_position - center
+			reach = maxf(reach, Vector2(o.x, o.z).length() + NoteScript.SIZE)
+		var lowest_id: int = group[0].id
+		for m in group:
+			lowest_id = mini(lowest_id, m.id)
+		var to := center - eye
+		stacks.append({"group": group, "center": center, "axis": axis, "long": long, "reach": reach,
+			"tall": (yhi - ylo) * 0.5 + NoteScript.SIZE, "id": lowest_id,
+			"bearing": atan2(to.dot(right), to.dot(fwd))})
+	var count := stacks.size()
+	var step := TAU / count
+	# Order: by angle round the viewer, starting from straight ahead (the
+	# stack within half a step of straight ahead comes first), ties by id.
+	for st in stacks:
+		st["key"] = fposmod(st["bearing"] + step * 0.5, TAU)
+	stacks.sort_custom(func(a, b):
+		if not is_equal_approx(a["key"], b["key"]):
+			return a["key"] < b["key"]
+		return a["id"] < b["id"])
+	# One radius: every stack fits in view, keeps its own blocks off the viewer,
+	# and clears its neighbours by ARRANGE_GAP (chord between middles >= both reaches + gap).
+	var radius := ARRANGE_MIN_DIST
+	for k in count:
+		var st: Dictionary = stacks[k]
+		radius = maxf(radius, st["reach"] / tan(hfov * 0.5))
+		radius = maxf(radius, st["tall"] / tan(vfov * 0.5))
+		radius = maxf(radius, st["reach"] + ARRANGE_MIN_DIST * 0.5)
+		if count > 1:
+			var next: Dictionary = stacks[(k + 1) % count]
+			radius = maxf(radius, (st["reach"] + next["reach"] + ARRANGE_GAP) / (2.0 * sin(step * 0.5)))
+	var entries: Array = []
+	var targets := {}  # block -> [place, rotation]
+	for k in count:
+		var st: Dictionary = stacks[k]
+		var b := k * step
+		var dir := fwd * cos(b) + right * sin(b)
+		var tangent := right * cos(b) - fwd * sin(b)
+		var place: Vector3 = eye + dir * radius
+		var turn := 0.0
+		if st["long"]:
+			var axis: Vector3 = st["axis"]
+			turn = atan2(axis.cross(tangent).y, axis.dot(tangent))
+			if absf(turn) > PI * 0.5:
+				turn -= signf(turn) * PI  # the shorter way: either end can face left
+		var q := Quaternion(Vector3.UP, turn)
+		for m in st["group"]:
+			targets[m] = [place + q * (m.global_position - st["center"]), (q * m.quaternion).normalized()]
+	for m in targets:
+		# Tiny differences (left over from arranging before) don't count as a move.
+		if (targets[m][0] as Vector3).distance_to(m.global_position) > 0.01 \
+				or (targets[m][1] as Quaternion).angle_to(m.quaternion) > 0.01:
+			entries.append(_move_record(m))
+			_ease_note(m, targets[m][0], targets[m][1], AI_MOVE_TIME, Tween.TRANS_BACK)
+	if entries.is_empty():
+		_toast("Already arranged")
+		return
+	_push_undo({"type": "group", "entries": entries, "label": "arrange around me"})
+	_select(null)
+	_toast(_shortcut_text("Arranged %d %s around you · Ctrl+Z undoes it"
+		% [count, "stack" if count == 1 else "stacks"]))
+
+
 ## Removes every block and link, and returns the undo entries that bring them back.
 func _clear_space() -> Array:
 	_end_drag()
@@ -2262,6 +2558,11 @@ func _breakdown_schema() -> Dictionary:
 
 func _edit_schema() -> Dictionary:
 	var pair := _strict_object({"from": {"type": "string"}, "to": {"type": "string"}})
+	var placement := _strict_object({
+		"id": {"type": "string"},
+		"near": {"type": "string"},
+		"side": {"type": "string", "enum": AI_SIDES},
+	})
 	return _strict_object({
 		"summary": {"type": "string"},
 		"add": {"type": "array", "items": _strict_object({
@@ -2281,19 +2582,25 @@ func _edit_schema() -> Dictionary:
 		"link": {"type": "array", "items": pair},
 		"unlink": {"type": "array", "items": pair},
 		"remove": {"type": "array", "items": {"type": "string"}},
+		"move": {"type": "array", "items": placement},
+		"move_stack": {"type": "array", "items": placement},
+		"arrange": {"type": "array", "items": {"type": "string"}},
 	})
 
 
 ## The current blocks and links, as Claude sees them for Add with AI.
+## Positions are from the user's point of view (level, facing where they look).
 func _space_for_ai() -> Dictionary:
+	var view := Basis(Vector3.UP, rig.yaw)
+	var eye := camera.global_position
 	var blocks: Array = []
 	var ids: Array = notes.keys()
 	ids.sort()
 	for id in ids:
 		var n: NoteScript = notes[id]
-		var p := n.global_position
+		var p := view.inverse() * (n.global_position - eye)
 		blocks.append({"id": str(id), "text": n.text, "status": n.status if n.status != "" else "none",
-			"color": palette.find(n.color),
+			"color": palette.find(n.color), "anchor": n.anchor,
 			"pos": [snappedf(p.x, 0.1), snappedf(p.y, 0.1), snappedf(p.z, 0.1)]})
 	var pairs: Array = []
 	for l in links:
@@ -2511,7 +2818,9 @@ func _apply_ai_edit(r: Dictionary) -> String:
 		by_id[str(id)] = notes[id]
 	var entries: Array = [{"type": "links", "links": links.duplicate(true)}]
 	var changed: Array[NoteScript] = []  # existing blocks that were edited, to pulse
-	var counts := {"added": 0, "edited": 0, "marked": 0, "recolored": 0, "linked": 0, "unlinked": 0, "removed": 0}
+	var counts := {"moved": 0, "arranged": 0, "added": 0, "edited": 0, "marked": 0, "recolored": 0,
+		"linked": 0, "unlinked": 0, "removed": 0}
+	var moved_from := {}  # block -> where it was before this edit
 
 	for item in _ai_list(r, "edit"):
 		var n: NoteScript = by_id.get(str(item.get("id", "")))
@@ -2541,6 +2850,28 @@ func _apply_ai_edit(r: Dictionary) -> String:
 			n.refresh()
 			_add_unique(changed, n)
 			counts["recolored"] += 1
+
+	# Moves: blocks jump to their new places now (so new blocks are placed
+	# around them), and fly there from their old places at the end.
+	for item in _ai_list(r, "move"):
+		var n: NoteScript = by_id.get(str(item.get("id", "")))
+		var near: NoteScript = by_id.get(str(item.get("near", "")))
+		if n and near and n != near:
+			_ai_move_stack([n], n, near, str(item.get("side", "")), FAN_CLEAR, FAN_DISTS[0], moved_from, entries)
+	for item in _ai_list(r, "move_stack"):
+		var n: NoteScript = by_id.get(str(item.get("id", "")))
+		if n == null:
+			continue
+		var members: Array[NoteScript] = [n]
+		members.append_array(_stack_of(n).keys())
+		var near: NoteScript = by_id.get(str(item.get("near", "")))
+		if near and members.has(near):
+			continue  # can't move a stack next to itself
+		_ai_move_stack(members, n, near, str(item.get("side", "")), AI_STACK_GAP, 6.0, moved_from, entries)
+	for id in _ai_list(r, "arrange"):
+		var n: NoteScript = by_id.get(str(id))
+		if n and _ai_arrange(n, moved_from, entries):
+			counts["arranged"] += 1
 
 	# New blocks: placed (in order, parents first) next to their parent, or as a
 	# new group in free space in front of the camera.
@@ -2593,6 +2924,9 @@ func _apply_ai_edit(r: Dictionary) -> String:
 			_delete_note(n)
 			counts["removed"] += 1
 
+	for n in moved_from:
+		if notes.has(n.id) and not n.global_position.is_equal_approx(moved_from[n]):
+			counts["moved"] += 1
 	var total := 0
 	for k in counts:
 		total += counts[k]
@@ -2604,6 +2938,12 @@ func _apply_ai_edit(r: Dictionary) -> String:
 	# Show what happened: new blocks grow out of their parent, edited ones pulse,
 	# and the view turns onto all of it.
 	var spots: Array[Vector3] = removed_spots.duplicate()
+	for n in moved_from:
+		if notes.has(n.id) and not n.global_position.is_equal_approx(moved_from[n]):
+			var target: Vector3 = n.global_position
+			spots.append(target)
+			n.global_position = moved_from[n]
+			_ease_note(n, target, n.quaternion, AI_MOVE_TIME, Tween.TRANS_BACK)
 	for n in new_notes:
 		var target := n.global_position
 		spots.append(target)
@@ -2616,13 +2956,138 @@ func _apply_ai_edit(r: Dictionary) -> String:
 	_frame_spots(spots)
 	_mark_dirty()
 
+	var summary := str(r.get("summary", "")).strip_edges()
+	if summary != "":
+		_toast(summary)
 	var parts: Array[String] = []
 	for k in counts:
 		if counts[k] > 0:
-			parts.append("%s %d" % [k, counts[k]])
-	parts[0] = parts[0].capitalize()
-	_toast(_shortcut_text(", ".join(parts) + " · Ctrl+Z undoes it"))
+			var noun := "" if k != "moved" else (" block" if counts[k] == 1 else " blocks")
+			if k == "arranged":
+				noun = " stack" if counts[k] == 1 else " stacks"
+			parts.append("%s %d%s" % [k, counts[k], noun])
+	var only_moves: bool = counts["moved"] == total - counts["arranged"]
+	var line := "Moved blocks around (%d)" % counts["moved"] if only_moves and counts["moved"] > 0 \
+			else ", ".join(parts).left(1).to_upper() + ", ".join(parts).substr(1)
+	_toast(_shortcut_text(line + " · Ctrl+Z undoes it"))
 	return ""
+
+
+## Moves `members` rigidly (keeping their offsets from `lead`) so that `lead`
+## sits on `side` of `near`, as the user sees it, starting `start_dist` away and
+## going farther until every member is at least `gap` from every other block.
+## With no `near`, the stack goes to free space in front of the user.
+## Old places go into `moved_from` and `entries` (for the undo step).
+func _ai_move_stack(members: Array[NoteScript], lead: NoteScript, near: NoteScript, side: String,
+		gap: float, start_dist: float, moved_from: Dictionary, entries: Array) -> void:
+	var offsets: Array[Vector3] = []
+	var inside := {}
+	for m in members:
+		offsets.append(m.global_position - lead.global_position)
+		inside[m] = true
+	var flat := Basis(Vector3.UP, rig.yaw)
+	var tries: Array[Vector3] = []
+	if near:
+		var dir := _side_dir(side if side in AI_SIDES else "right")
+		for i in 40:
+			tries.append(near.global_position + dir * (start_dist + i * 1.5))
+	else:
+		var base := camera.global_position - flat.z * BD_MIN_DIST
+		for back in 10:
+			for s in [0, 1, -1, 2, -2, 3, -3]:
+				tries.append(base + flat.x * (s * AI_CLUSTER_GAP) - flat.z * (back * AI_CLUSTER_GAP))
+	for p in tries:
+		var clear := true
+		for v in notes.values():
+			if inside.has(v):
+				continue
+			for off in offsets:
+				if (v as NoteScript).global_position.distance_to(p + off) < gap:
+					clear = false
+					break
+			if not clear:
+				break
+		if clear:
+			for k in members.size():
+				_ai_place(members[k], p + offsets[k], moved_from, entries)
+			return
+
+
+## Lays a stack out again as a 3D mind map (like a breakdown) around its anchor,
+## which stays put: the block itself if it's an anchor, else the nearest anchor
+## linked to it, else the block. Returns whether anything moved.
+func _ai_arrange(n: NoteScript, moved_from: Dictionary, entries: Array) -> bool:
+	var stack := _stack_of(n)
+	if stack.is_empty():
+		return false
+	var root := n
+	if not n.anchor:
+		var best := INF
+		for m in stack:
+			if m.anchor and stack[m] < best:
+				best = stack[m]
+				root = m
+	var inside := {n: true}
+	for m in stack:
+		inside[m] = true
+	# A tree from the root, breadth first: each block hangs from the block it was reached through.
+	var neighbors := {}
+	for l in links:
+		neighbors.get_or_add(l[0], []).append(l[1])
+		neighbors.get_or_add(l[1], []).append(l[0])
+	var parent := {root: null}
+	var order: Array[NoteScript] = []
+	var queue: Array[NoteScript] = [root]
+	while not queue.is_empty():
+		var b: NoteScript = queue.pop_front()
+		for other_id in neighbors.get(b.id, []):
+			var o: NoteScript = notes.get(other_id)
+			if o and inside.has(o) and not parent.has(o):
+				parent[o] = b
+				order.append(o)
+				queue.append(o)
+	var obstacles: Array[Vector3] = [root.global_position]
+	for v in notes.values():
+		if not inside.has(v):
+			obstacles.append((v as NoteScript).global_position)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(root.text)
+	var placed := {root: root.global_position}
+	for b in order:
+		var pb: NoteScript = parent[b]
+		var out := Vector3.DOWN
+		if parent[pb] != null:
+			out = ((placed[pb] - placed[parent[pb]]).normalized() + Vector3.DOWN * 0.6).normalized()
+		var p := _fan_spot(placed[pb], out, obstacles, rng)
+		obstacles.append(p)
+		placed[b] = p
+	var any := false
+	for b in order:
+		if not (placed[b] as Vector3).is_equal_approx(b.global_position):
+			_ai_place(b, placed[b], moved_from, entries)
+			any = true
+	return any
+
+
+## Puts block `n` at `p` now, remembering where it was (once per edit).
+func _ai_place(n: NoteScript, p: Vector3, moved_from: Dictionary, entries: Array) -> void:
+	if not moved_from.has(n):
+		moved_from[n] = n.global_position
+		entries.append(_move_record(n))
+	n.global_position = p
+
+
+## A direction for a side as the user sees it (level, facing where they look).
+func _side_dir(side: String) -> Vector3:
+	var flat := Basis(Vector3.UP, rig.yaw)
+	match side:
+		"left": return -flat.x
+		"right": return flat.x
+		"above": return Vector3.UP
+		"below": return Vector3.DOWN
+		"front": return flat.z
+		"behind": return -flat.z
+	return flat.x
 
 
 ## r[key] if it's a list, else an empty one (so a malformed answer is just skipped).
