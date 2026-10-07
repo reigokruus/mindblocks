@@ -27,13 +27,13 @@ On macOS, use Cmd wherever this says Ctrl (Cmd+Z, Cmd+C, Cmd+Enter…); the in-a
 | Move note | Hold click on it and look around / fly — it's carried along |
 | Move note nearer / farther | Scroll while carrying |
 | Move a cube along its own sides | Select it, then drag one of its colored arrows (red X, green Y, blue Z; they turn with the cube) |
-| Snap a cube next to another | Move it close to another cube: a ghost shows where it will land; let go to snap (hold Shift to place freely) |
+| Snap a cube next to another | Move it close to another cube: a ghost shows where it will land; let go to snap (hold Shift to place freely); it clicks when it lands |
 | No overlapping | A cube dropped, created or pasted inside / too close to another floats away to the nearest free spot; the other cube stays put |
 | Rotate a cube freely | Hold R and move the mouse (selected or carried cube) |
 | Turn a cube 90° | Arrow keys (selected cube) |
 | Straighten a cube | Double-tap R (upright and lined up with the grid; position stays) |
-| Link / unlink two notes | Select one, Shift+click the other |
-| Anchor blocks | An anchor (thick dark frame) carries every block linked to it, directly or through other blocks, when you move it, so linked stacks move as one; Ctrl+Z puts them all back. Toggle Anchor in the editor. AI group titles start as anchors |
+| Link / unlink two notes | Select one, Shift+click the other (a click sounds; a lower one for unlinking) |
+| Anchor blocks | An anchor (thick dark frame) carries every block linked to it, directly or through other blocks, when you move it, so linked stacks move as one, wobbling a little on the way and settling exactly where you put them; Ctrl+Z puts them all back. Toggle Anchor in the editor. AI group titles start as anchors |
 | Recolor selected | 1–7 |
 | Focus camera on selected | F |
 | Delete selected | Delete / Backspace |
@@ -111,14 +111,18 @@ recommended fallback model (`fallbacks: "default"`).
 project.godot        GL Compatibility renderer, so it runs on laptops, phones and the web
 main.tscn            one Node3D with main.gd; everything else is built in code
 scripts/main.gd      environment, input, picking, dragging, links, editor UI, AI breakdown, save/load
-scripts/note.gd      one note: a cube with Label3D text on every face, outline, done/failed marks
+scripts/note.gd      one note: a cube with its text on the face toward you, outline, done/failed marks
 scripts/camera_rig.gd orbit / pan / zoom / fly camera
 ```
 
 A few design decisions worth knowing before you change things:
 
-- **Notes are cubes with the text on all six faces**, so they read from any
-  side. They keep their own rotation (saved as a quaternion); R + mouse turns
+- **Notes are cubes with their text on one face**: the face turned most
+  toward the camera. As you fly around, the text crossfades to whichever face
+  now faces you best (with a little hysteresis so it doesn't flicker at 45°),
+  and it's always upright: on side faces it stays level with the world however
+  you move, and on top / bottom faces it clicks round in quarter turns to face
+  you, so it's never upside down or sideways. They keep their own rotation (saved as a quaternion); R + mouse turns
   one trackball-style around the camera's axes, arrow keys do eased 90° turns.
   New notes start upright with a face toward the camera.
 - **Picking doesn't use physics.** `_pick()` transforms the mouse ray into
@@ -138,7 +142,10 @@ A few design decisions worth knowing before you change things:
   self-glow so colors stay bright). Selection is an inverted-hull outline.
 - **Anchors** carry their stack. When an anchor is grabbed, every block linked
   to it (transitively, through any links) records its offset from the anchor and
-  is kept there each frame until the anchor lands. Snapping is decided by the
+  is pulled toward that spot by a damped spring (`FOLLOW_*` in main.gd), so the
+  stack lags, overshoots and wobbles a little, tilting with its speed, with
+  blocks more links away a bit looser. Once the anchor has landed and the stack
+  has come to rest, every block is put exactly in place. Snapping is decided by the
   anchor alone, then the whole stack is shifted clear of outside blocks.
 - **All cubes are the same size; the text scales to fit a face.**
   `_fit_font_size()` binary-searches the largest font size at which the

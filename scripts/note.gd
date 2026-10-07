@@ -1,5 +1,7 @@
 extends Node3D
-## A single note: a cube floating in 3D space, with the note's text on all six faces.
+## A single note: a cube floating in 3D space. Its text shows on one face only:
+## the one turned most toward the camera, crossfading to another face as the
+## camera moves round, and turned in quarter turns to read upright from where you are.
 ## Every note is the same size; the text is scaled to fill a face, so a single
 ## word is huge and a paragraph is small.
 ## Notes keep their own rotation (they don't turn toward the camera); main
@@ -99,6 +101,12 @@ void fragment() {
 	ALPHA = color.a * (1.0 - smoothstep(half_width - aa, half_width + aa, d));
 }
 """
+## Text face switching: how long the crossfade takes, and how much more a
+## face must point at the camera than the current one to take over (so it
+## doesn't flicker at 45°).
+const FADE_TIME := 0.25
+const FACE_HYSTERESIS := 0.1
+const UPRIGHT_HYSTERESIS := 0.15
 const FINISHED_ALPHA := 0.5  # done / failed cubes are see-through, text included
 const DONE_COLOR := Color(0.02, 0.6, 0.18, 0.65)
 const FAILED_COLOR := Color(0.9, 0.12, 0.12, 0.6)
@@ -120,6 +128,11 @@ var _labels: Array[Label3D] = []
 var _marks: Array[MeshInstance3D] = []
 var _mark_mat: ShaderMaterial
 var _dim := 0.0
+var _shown := -1  # face showing the text, or -1 before the first frame
+var _face_vis: Array[float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # text opacity per face
+var _face_up: Array[Vector3] = []  # text "up" per face, in the cube's space
+var _ink := Color.BLACK
+var _alpha := 1.0
 
 
 func _ready() -> void:
@@ -163,7 +176,9 @@ func _ready() -> void:
 		var face_basis := Basis.looking_at(-normal, f[1])  # +Z points out of the face
 		var l := _make_label()
 		l.transform = Transform3D(face_basis, normal * (SIZE * 0.5 + 0.004))
+		l.visible = false
 		_labels.append(l)
+		_face_up.append(f[1])
 		add_child(l)
 		var m := MeshInstance3D.new()
 		m.mesh = quad
@@ -221,9 +236,10 @@ func _apply_depth_fx() -> void:
 	if _cube_mat.shader != shader:
 		_cube_mat.shader = shader
 	var ink := Color(0.1, 0.1, 0.12) if color.get_luminance() > 0.5 else Color(0.96, 0.96, 0.96)
-	ink = ink.darkened(_dim * 0.5)
-	for l in _labels:
-		l.modulate = Color(ink, alpha)
+	_ink = ink.darkened(_dim * 0.5)
+	_alpha = alpha
+	for i in _labels.size():
+		_labels[i].modulate = Color(_ink, _alpha * ease(_face_vis[i], -2.0))
 	for m in _marks:
 		m.visible = status != ""
 	if status != "":
@@ -231,6 +247,69 @@ func _apply_depth_fx() -> void:
 		mark_col = mark_col.darkened(_dim)
 		_mark_mat.set_shader_parameter("color", mark_col)
 		_mark_mat.set_shader_parameter("shape", 1 if status == "done" else 2)
+
+
+## Picks the face turned most toward the camera for the text, fades faces in
+## and out, and clicks the text on the shown face(s) round to read upright.
+func _process(delta: float) -> void:
+	var cam := get_viewport().get_camera_3d()
+	if cam == null or _labels.is_empty():
+		return
+	var inv := global_transform.affine_inverse()
+	var cam_local := inv * cam.global_position
+	var best := 0
+	var scores: Array[float] = []
+	for i in FACES.size():
+		var n: Vector3 = FACES[i][0]
+		scores.append(n.dot((cam_local - n * SIZE * 0.5).normalized()))
+		if scores[i] > scores[best]:
+			best = i
+	var first := _shown < 0
+	if first or (best != _shown and scores[best] > scores[_shown] + FACE_HYSTERESIS):
+		_shown = best
+	var cam_up := (inv.basis * cam.global_transform.basis.y).normalized()
+	for i in FACES.size():
+		var target := 1.0 if i == _shown else 0.0
+		var was := _face_vis[i]
+		_face_vis[i] = target if first else move_toward(was, target, delta / FADE_TIME)
+		var l := _labels[i]
+		l.visible = _face_vis[i] > 0.001
+		if not l.visible:
+			continue
+		if _face_vis[i] != was:
+			l.modulate = Color(_ink, _alpha * ease(_face_vis[i], -2.0))
+		_turn_upright(i, cam_up, cam_local)
+
+
+## Turns face `i`'s text upright, in quarter turns: of the face's four edge
+## directions, the one closest to the wanted up becomes the text's up. On side
+## faces (facing sideways in the world) that's the world's up, so their text
+## stays upright however you move; on faces pointing up or down it's the
+## camera's up, so the text faces you. A new direction has to be clearly closer
+## (UPRIGHT_HYSTERESIS) before the text clicks round, so it doesn't flip back
+## and forth halfway between two.
+func _turn_upright(i: int, cam_up: Vector3, cam_local: Vector3) -> void:
+	var n: Vector3 = FACES[i][0]
+	var world_n := (global_transform.basis * n).normalized()
+	var ref := cam_up if absf(world_n.y) > 0.7 else (global_transform.basis.inverse() * Vector3.UP).normalized()
+	var want := ref - n * ref.dot(n)
+	if want.length() < 0.2:
+		# The wanted up is nearly along the normal: use the way the camera looks across the face.
+		var across := n * SIZE * 0.5 - cam_local
+		want = across - n * across.dot(n)
+	if want.length() < 0.001:
+		return
+	want = want.normalized()
+	var a: Vector3 = FACES[i][1]
+	var b := n.cross(a)
+	var up := _face_up[i]
+	for c in [a, -a, b, -b]:
+		if c.dot(want) > up.dot(want) + UPRIGHT_HYSTERESIS:
+			up = c
+	if up.is_equal_approx(_face_up[i]):
+		return
+	_face_up[i] = up
+	_labels[i].basis = Basis(up.cross(n), up, n)
 
 
 func set_selected(on: bool) -> void:

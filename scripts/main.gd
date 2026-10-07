@@ -96,6 +96,12 @@ void fragment() {
 }
 """
 const SETTLE_TIME := 0.4
+## The click played when two blocks get linked or a block snaps into place:
+## a short, quickly fading tick made in code (no sound file needed).
+const CLICK_HZ := 1700.0
+const CLICK_LENGTH := 0.045
+const CLICK_DECAY := 110.0  # per second
+const CLICK_VOLUME_DB := -8.0
 const UNDO_LIMIT := 50
 ## Undo / redo messages, top right: the newest sits at the bottom of the stack,
 ## older ones float up and fade; each disappears after TOAST_LIFE seconds.
@@ -151,6 +157,15 @@ const BD_EASE_TIME := 0.6
 ## Add with AI: how far apart new top-level groups are kept from everything
 ## else, and how much changed blocks swell when they pulse.
 const AI_CLUSTER_GAP := 10.0
+## A moving anchor's stack follows on springs: stiffness (per link hop 1,
+## loosened by FOLLOW_HOP_LOOSEN for each hop further), damping ratio (below
+## 1 overshoots), tilt (radians per unit/s of speed, up to FOLLOW_MAX_TILT).
+const FOLLOW_STIFFNESS := 120.0
+const FOLLOW_DAMPING := 0.45
+const FOLLOW_HOP_LOOSEN := 0.35
+const FOLLOW_TILT := 0.02
+const FOLLOW_MAX_TILT := 0.3
+const FOLLOW_SUBSTEPS := 3
 const AI_PULSE := 1.2
 
 const HELP_TEXT := """Mouse — look around · clicks act at the crosshair
@@ -243,6 +258,7 @@ var last_click: Dictionary = {}
 ## tween (the anchor's ease after it's let go, if any)}. Every block linked to
 ## the anchor, directly or through others, keeps its offset.
 var follow: Dictionary = {}
+var click_player: AudioStreamPlayer
 ## Ctrl+C copies the selected cube here: {text, color, status, rot}.
 var clipboard: Dictionary = {}
 
@@ -295,6 +311,7 @@ func _ready() -> void:
 	notes_root.name = "Notes"
 	add_child(notes_root)
 	_build_ui()
+	_build_click()
 	ai_http = HTTPRequest.new()
 	ai_http.timeout = AI_TIMEOUT
 	ai_http.request_completed.connect(_on_ai_response)
@@ -928,6 +945,7 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 				return
 			if hit and e.shift_pressed and selected and selected != hit:
 				_toggle_link(selected, hit)
+				_click(1.0 if _linked(selected, hit) else 0.75)  # unlinking clicks lower
 				return
 			if hit and e.alt_pressed:
 				hit = _copy_in_place(hit)  # drag out a copy, the original stays
@@ -1222,10 +1240,11 @@ func _end_drag() -> void:
 		if not target.is_equal_approx(moved.global_position) or snap:
 			follow["tween"] = _ease_note(moved, target,
 				snap_target["rot"] if snap else moved.quaternion, SNAP_TIME if snap else SETTLE_TIME)
-		else:
-			follow = {}
+			if snap:
+				(follow["tween"] as Tween).finished.connect(_click)
+		# The stack keeps following until it has wobbled to rest (see _update_follow).
 	elif snap:
-		_ease_note(moved, snap_target["pos"], snap_target["rot"], SNAP_TIME)
+		_ease_note(moved, snap_target["pos"], snap_target["rot"], SNAP_TIME).finished.connect(_click)
 	elif moved:
 		_settle(moved)  # dropped inside / too close to another cube: float free
 	snap_target = {}
@@ -1234,24 +1253,56 @@ func _end_drag() -> void:
 		_commit_move()
 
 
+# --- Click sound ------------------------------------------------------------
+
+## Synthesizes the click: a sine tick with a fast fade, as 16-bit mono PCM.
+func _build_click() -> void:
+	var rate := 44100
+	var count := int(rate * CLICK_LENGTH)
+	var data := PackedByteArray()
+	data.resize(count * 2)
+	for i in count:
+		var t := float(i) / rate
+		var v := sin(TAU * CLICK_HZ * t) * exp(-t * CLICK_DECAY)
+		v *= minf(1.0, t * 2000.0)  # half a millisecond fade-in, so it doesn't pop
+		data.encode_s16(i * 2, int(clampf(v, -1.0, 1.0) * 26000.0))
+	var wav := AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = rate
+	wav.stereo = false
+	wav.data = data
+	click_player = AudioStreamPlayer.new()
+	click_player.stream = wav
+	click_player.volume_db = CLICK_VOLUME_DB
+	click_player.max_polyphony = 4  # quick clicks in a row don't cut each other off
+	add_child(click_player)
+
+
+## Plays the click, at `pitch` (1 = normal) with a slight random variation.
+func _click(pitch: float = 1.0) -> void:
+	click_player.pitch_scale = pitch * randf_range(0.95, 1.05)
+	click_player.play()
+
+
 # --- Anchors ----------------------------------------------------------------
 
-## Every block linked to `n`, directly or through other blocks (not `n` itself).
-func _stack_of(n: NoteScript) -> Array[NoteScript]:
+## Every block linked to `n`, directly or through other blocks (not `n`
+## itself), with how many links away from `n` it is.
+func _stack_of(n: NoteScript) -> Dictionary:
 	var neighbors := {}  # id -> linked ids
 	for l in links:
 		neighbors.get_or_add(l[0], []).append(l[1])
 		neighbors.get_or_add(l[1], []).append(l[0])
-	var seen := {n.id: true}
+	var hops := {n.id: 0}
 	var queue: Array = [n.id]
-	var stack: Array[NoteScript] = []
+	var stack := {}
 	while not queue.is_empty():
-		var id = queue.pop_back()
+		var id = queue.pop_front()
 		for other in neighbors.get(id, []):
-			if not seen.has(other) and notes.has(other):
-				seen[other] = true
+			if not hops.has(other) and notes.has(other):
+				hops[other] = hops[id] + 1
 				queue.append(other)
-				stack.append(notes[other])
+				stack[notes[other]] = hops[other]
 	return stack
 
 
@@ -1263,35 +1314,68 @@ func _start_follow(n: NoteScript) -> void:
 	follow = {}
 	if n == null or not n.anchor:
 		return
+	var stack := _stack_of(n)
+	if stack.is_empty():
+		return
 	var offsets := {}
 	var records: Array = []
-	for m in _stack_of(n):
+	var springs := {}
+	for m in stack:
 		offsets[m] = m.global_position - n.global_position
 		records.append(_move_record(m))
-	if offsets.is_empty():
-		return
-	follow = {"anchor": n, "offsets": offsets}
+		springs[m] = {"vel": Vector3.ZERO, "rot": m.quaternion, "hops": stack[m]}
+	follow = {"anchor": n, "offsets": offsets, "springs": springs}
 	move_start["followers"] = records
 
 
-## Keeps the stack at its offsets from the anchor; once the anchor has been
-## let go and has finished easing, the stack stops following.
-func _update_follow() -> void:
+## Moves the stack after its anchor. Each block is pulled toward its place
+## (its offset from the anchor) by a damped spring, so it lags, overshoots and
+## wobbles a little, tilting with its speed; blocks more links away are looser.
+## Once the anchor has been let go and has landed, and every block has come
+## to rest, they're put exactly in place and the stack stops following.
+## With `force`, everything lands at once (before undo / redo, or a new move).
+func _update_follow(force: bool = false) -> void:
 	if follow.is_empty():
 		return
 	var a: NoteScript = follow["anchor"]
 	if not is_instance_valid(a) or not notes.has(a.id):
 		follow = {}
 		return
-	for m in follow["offsets"]:
-		if is_instance_valid(m) and notes.has(m.id):
-			var p: Vector3 = a.global_position + follow["offsets"][m]
-			if not p.is_equal_approx(m.global_position):
-				m.global_position = p
-				_mark_dirty()
 	var held := a == dragging or (gizmo_axis >= 0 and a == selected)
 	var tween: Tween = follow.get("tween")
-	if not held and (tween == null or not tween.is_running()):
+	var anchor_done := not held and (tween == null or not tween.is_running())
+	var dt := minf(get_process_delta_time(), 0.05) / FOLLOW_SUBSTEPS
+	var resting := true
+	for m in follow["offsets"]:
+		if not (is_instance_valid(m) and notes.has(m.id)):
+			continue
+		var target: Vector3 = a.global_position + follow["offsets"][m]
+		var spring: Dictionary = follow["springs"][m]
+		if force:
+			m.global_position = target
+			m.quaternion = spring["rot"]
+			continue
+		var k: float = FOLLOW_STIFFNESS / (1.0 + FOLLOW_HOP_LOOSEN * (spring["hops"] - 1))
+		var c := 2.0 * FOLLOW_DAMPING * sqrt(k)
+		var x: Vector3 = m.global_position
+		var v: Vector3 = spring["vel"]
+		for step in FOLLOW_SUBSTEPS:
+			v += (k * (target - x) - c * v) * dt
+			x += v * dt
+		spring["vel"] = v
+		m.global_position = x
+		var tilt := minf(v.length() * FOLLOW_TILT, FOLLOW_MAX_TILT)
+		var axis := Vector3.UP.cross(v)
+		m.quaternion = (Quaternion(axis.normalized(), tilt) * spring["rot"]).normalized() \
+				if axis.length() > 0.001 else spring["rot"]
+		if x.distance_to(target) > 0.01 or v.length() > 0.05:
+			resting = false
+	_mark_dirty()
+	if force or (anchor_done and resting):
+		for m in follow["offsets"]:
+			if is_instance_valid(m) and notes.has(m.id):
+				m.global_position = a.global_position + follow["offsets"][m]
+				m.quaternion = follow["springs"][m]["rot"]
 		follow = {}
 
 
@@ -1555,7 +1639,7 @@ func _finish_easing() -> void:
 			e["note"].quaternion = e["rot"]
 			_mark_dirty()
 	easing.clear()
-	_update_follow()  # a stack whose anchor just jumped catches up, and stops following
+	_update_follow(true)  # a stack still moving lands too
 
 
 # --- Notes & links ----------------------------------------------------------
@@ -1785,6 +1869,7 @@ func _add_note_beside(n: NoteScript, i: int) -> void:
 	var new_note := _create_note(pos, "", last_color)
 	new_note.quaternion = n.quaternion  # same orientation as its neighbour
 	_toggle_link(n, new_note)
+	_click()
 	_push_create(new_note, "new block")
 	_open_editor(new_note)
 
