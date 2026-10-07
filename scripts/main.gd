@@ -44,6 +44,10 @@ const PLUS_RADIUS := 0.28
 const ROTATE_SPEED := 0.01
 const TURN_TIME := 0.3
 const DOUBLE_TAP_TIME := 0.35  # seconds between two R presses that count as a double-tap
+## Two quick clicks only make a double-click if they hit the same block, or both
+## hit empty space with the aim turned less than this (radians) in between. With
+## the mouse captured, the OS sees every click at the same spot, so it can't tell.
+const DOUBLE_CLICK_ANGLE := 0.05
 const PLUS_GAP := 0.45
 ## Move gizmo on the selected cube: one arrow per axis of the cube itself
 ## (X red, Y green, Z blue, as in the Godot editor's local mode), so the arrows
@@ -108,9 +112,41 @@ const UI_DESIGN_SIZE := Vector2(1280, 760)
 ## screen's own scale (2 on Retina), so text stays readable.
 const UI_SCALE_MIN := 0.75
 const UI_SCALE_MAX := 4.0
+## AI, two ways. Break down a task (B) starts a new notespace: Claude splits a
+## described task into groups of tasks and subtasks, laid out as blocks.
+## Add with AI (Shift+B) sends Claude the current blocks and a request, and
+## applies the changes it returns. The key comes from ANTHROPIC_API_KEY,
+## or is typed into the panel once and kept in SETTINGS_PATH (never in notes.json).
+const AI_URL := "https://api.anthropic.com/v1/messages"
+const AI_MODEL := "claude-opus-5-5"
+const SETTINGS_PATH := "user://settings.cfg"
+const AI_TIMEOUT := 180.0
+const AI_SYSTEM := """You break a big task down into blocks for a 3D note board.
+Each block is a small cube with a few words on it, so keep every text short enough to fit on a cube face: at most 60 characters, a group title 1-4 words. No numbering or bullet characters.
+Group related work together: 2-6 groups, each with a short title and 2-6 tasks, and each task with 0-4 concrete subtasks.
+Order groups and tasks roughly in the order they'd be done. Write in the same language as the request."""
+const AI_EDIT_SYSTEM := """You change a 3D note board where every note is a small cube with a few words on it.
+You get the current blocks (id, text, status, color index, position; y is up) and the links between them, then a request. Make only the changes the request asks for.
+New blocks: give each a temp_id like "n1" and a parent: the id or temp_id of the most related block it belongs under (a task under its group's title block, a subtask under its task), or "" for a new top-level group. List parents before their children. Every new block is linked to its parent automatically, so don't also list those links.
+Keep every text short enough to fit on a cube face: at most 60 characters, no numbering or bullet characters.
+Colors are 0 yellow, 1 pink, 2 blue, 3 green, 4 orange, 5 purple, 6 white; use -1 for a new block to take its parent's color.
+Use empty lists for kinds of change you don't need. summary: one short sentence on what you changed. Write in the same language as the request."""
+## Breakdown layout, seen from the front: groups side by side, each with its
+## title block on top, its tasks in a row under that, and each task's subtasks
+## stacked flush under the task (snap spacing). Tasks have a small gap between
+## them so each task's column reads on its own; groups are 2.5 cube widths apart.
+const BD_TASK_STEP := 3.2
+const BD_TITLE_DROP := 3.6
+const BD_GROUP_GAP := 5.0
+const BD_MIN_DIST := 12.0
+const BD_EASE_TIME := 0.6
+## Add with AI: how far apart new top-level groups are kept from everything
+## else, and how much changed blocks swell when they pulse.
+const AI_CLUSTER_GAP := 6.0
+const AI_PULSE := 1.2
 
 const HELP_TEXT := """Mouse — look around · clicks act at the crosshair
-Esc — pause and free the cursor · the pause menu has New notespace (start over) and Exit
+Esc — pause and free the cursor · the pause menu has New notespace, Break down a task, Add with AI and Exit
 Double-click empty space — new note · click a cube, then + on a face — new linked cube there
 Double-click a note / Enter — edit it
 Hold click on a note — carry it (scroll while carrying: nearer / farther)
@@ -125,6 +161,7 @@ Right-drag — orbit · Middle-drag or Shift+right-drag — pan
 Scroll — zoom · W A S D / Q E — fly (Shift = faster)
 Space — fly up
 G — floor guides on / off
+B — break down a task with Claude into a new notespace · Shift+B — add / change blocks with Claude
 H — show / hide this help · saves automatically"""
 
 var palette: Array[Color] = [
@@ -149,7 +186,8 @@ var last_color: Color
 ## {type: "move", id, pos, rot} (where the cube was before it moved / turned) or
 ## {type: "create", id} (a copied / pasted cube, which undo removes) or
 ## {type: "group", entries} (several steps undone / redone together) or
-## {type: "edit", id, text, color, status} (what a cube said / looked like).
+## {type: "edit", id, text, color, status} (what a cube said / looked like) or
+## {type: "links", links} (the whole link list, as it was).
 ## Every entry also has a "label" (e.g. "block move") for the undo message.
 var undo_stack: Array[Dictionary] = []
 ## Undone steps, newest last, in the same format. Any new action clears it.
@@ -189,6 +227,9 @@ var turn_tween: Tween
 var turn_target := Quaternion.IDENTITY
 var turn_note: NoteScript = null
 var last_r_press := -1.0
+## The previous left click: {id (block hit, or -1), dir (aim ray)}, or {} after
+## a click that can't start a double-click.
+var last_click: Dictionary = {}
 ## Ctrl+C copies the selected cube here: {text, color, status, rot}.
 var clipboard: Dictionary = {}
 
@@ -206,6 +247,20 @@ var pause_buttons: Control  # Continue / New notespace
 var new_confirm: Control  # "Start a new notespace?" with its two buttons
 var crosshair: Control
 var paused := false
+var ai_panel: PanelContainer
+var ai_prompt: TextEdit
+var ai_key_edit: LineEdit
+var ai_status: Label
+var ai_generate_btn: Button
+var ai_title: Label
+var ai_about: Label
+var ai_buttons: Control  # Cancel / Generate
+var ai_confirm: Control  # "This erases all current blocks" with its two buttons
+## "breakdown" (new notespace) or "edit" (Add with AI); each keeps its own draft.
+var ai_mode := "breakdown"
+var ai_drafts: Dictionary = {}
+var ai_http: HTTPRequest
+var ai_busy := false
 
 
 # --- Setup ------------------------------------------------------------------
@@ -226,6 +281,10 @@ func _ready() -> void:
 	notes_root.name = "Notes"
 	add_child(notes_root)
 	_build_ui()
+	ai_http = HTTPRequest.new()
+	ai_http.timeout = AI_TIMEOUT
+	ai_http.request_completed.connect(_on_ai_response)
+	add_child(ai_http)
 	get_window().size_changed.connect(_update_ui_scale)
 	_update_ui_scale()
 	if not _load():
@@ -473,6 +532,14 @@ func _build_ui() -> void:
 	new_btn.text = "New notespace"
 	new_btn.custom_minimum_size = Vector2(200, 40)
 	new_btn.pressed.connect(_show_new_confirm.bind(true))
+	var ai_btn := Button.new()
+	ai_btn.text = "Break down a task"
+	ai_btn.custom_minimum_size = Vector2(200, 40)
+	ai_btn.pressed.connect(_open_ai_panel.bind("breakdown"))
+	var ai_edit_btn := Button.new()
+	ai_edit_btn.text = "Add with AI"
+	ai_edit_btn.custom_minimum_size = Vector2(200, 40)
+	ai_edit_btn.pressed.connect(_open_ai_panel.bind("edit"))
 	var exit_btn := Button.new()
 	exit_btn.text = "Exit"
 	exit_btn.custom_minimum_size = Vector2(200, 40)
@@ -481,6 +548,8 @@ func _build_ui() -> void:
 	buttons.add_theme_constant_override("separation", 10)
 	buttons.add_child(continue_btn)
 	buttons.add_child(new_btn)
+	buttons.add_child(ai_btn)
+	buttons.add_child(ai_edit_btn)
 	buttons.add_child(exit_btn)
 	pause_buttons = buttons
 	menu_box.add_child(buttons)
@@ -507,6 +576,90 @@ func _build_ui() -> void:
 	confirm.add_child(confirm_row)
 	new_confirm = confirm
 	menu_box.add_child(confirm)
+
+	_build_ai_panel(layer)
+
+
+## AI panel (center), for both Break down a task and Add with AI: the request,
+## the API key if there's none yet, a status line, and Generate. Breaking down
+## over existing blocks asks first, in place of the buttons.
+func _build_ai_panel(layer: CanvasLayer) -> void:
+	ai_panel = PanelContainer.new()
+	ai_panel.anchor_left = 0.5
+	ai_panel.anchor_right = 0.5
+	ai_panel.anchor_top = 0.5
+	ai_panel.anchor_bottom = 0.5
+	ai_panel.offset_left = -320
+	ai_panel.offset_right = 320
+	ai_panel.offset_top = -170
+	ai_panel.offset_bottom = 170
+	ai_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	ai_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.12, 0.13, 0.16, 0.96), 10))
+	ai_panel.visible = false
+	layer.add_child(ai_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	ai_panel.add_child(vbox)
+
+	ai_title = Label.new()
+	vbox.add_child(ai_title)
+
+	ai_about = Label.new()
+	ai_about.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	ai_about.add_theme_color_override("font_color", Color(0.7, 0.72, 0.78))
+	vbox.add_child(ai_about)
+
+	ai_prompt = TextEdit.new()
+	ai_prompt.custom_minimum_size = Vector2(0, 130)
+	ai_prompt.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	ai_prompt.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	vbox.add_child(ai_prompt)
+
+	ai_key_edit = LineEdit.new()
+	ai_key_edit.secret = true
+	ai_key_edit.placeholder_text = "Anthropic API key (sk-ant-…), kept on this computer"
+	vbox.add_child(ai_key_edit)
+
+	ai_status = Label.new()
+	ai_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	ai_status.add_theme_color_override("font_color", Color(1.0, 0.75, 0.6))
+	vbox.add_child(ai_status)
+
+	var row := HBoxContainer.new()
+	var cancel_btn := Button.new()
+	cancel_btn.text = "Cancel"
+	cancel_btn.pressed.connect(_close_ai_panel)
+	row.add_child(cancel_btn)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(spacer)
+	ai_generate_btn = Button.new()
+	ai_generate_btn.pressed.connect(_ai_generate)
+	row.add_child(ai_generate_btn)
+	ai_buttons = row
+	vbox.add_child(row)
+
+	var confirm := VBoxContainer.new()
+	confirm.add_theme_constant_override("separation", 10)
+	confirm.visible = false
+	var question := Label.new()
+	question.text = _shortcut_text("This erases all current blocks (Ctrl+Z brings them back). Continue?")
+	question.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	confirm.add_child(question)
+	var confirm_row := HBoxContainer.new()
+	confirm_row.add_theme_constant_override("separation", 10)
+	var erase_btn := Button.new()
+	erase_btn.text = "Erase and generate"
+	erase_btn.pressed.connect(_ai_generate.bind(true))
+	confirm_row.add_child(erase_btn)
+	var keep_btn := Button.new()
+	keep_btn.text = "Cancel"
+	keep_btn.pressed.connect(_show_ai_confirm.bind(false))
+	confirm_row.add_child(keep_btn)
+	confirm.add_child(confirm_row)
+	ai_confirm = confirm
+	vbox.add_child(confirm)
 
 
 ## Window size is in real pixels (so a Retina screen counts double), which makes
@@ -544,7 +697,7 @@ func _process(delta: float) -> void:
 			dragging.global_position = held
 			drag_moved = true
 
-	rig.input_blocked = editor_panel.visible or paused
+	rig.input_blocked = _panel_open() or paused
 	crosshair.visible = _mouse_captured()
 	_redraw_links()
 	_update_plus_buttons()
@@ -666,6 +819,16 @@ func _redraw_guides() -> void:
 ## Runs before the GUI, so it can close the editor on Esc / Ctrl+Enter / outside click,
 ## and toggle the pause menu on Esc otherwise.
 func _input(event: InputEvent) -> void:
+	if ai_panel.visible:
+		if event is InputEventKey and event.pressed and not event.echo:
+			var ak := event as InputEventKey
+			if ak.keycode == KEY_ESCAPE:
+				_close_ai_panel()
+				get_viewport().set_input_as_handled()
+			elif (ak.keycode == KEY_ENTER or ak.keycode == KEY_KP_ENTER) and ak.is_command_or_control_pressed():
+				_ai_generate()
+				get_viewport().set_input_as_handled()
+		return
 	if not editor_panel.visible:
 		if event is InputEventKey and event.pressed and not event.echo \
 				and (event as InputEventKey).keycode == KEY_ESCAPE:
@@ -691,7 +854,7 @@ func _input(event: InputEvent) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if editor_panel.visible or paused:
+	if _panel_open() or paused:
 		return
 	if event is InputEventMouseButton:
 		_on_mouse_button(event as InputEventMouseButton)
@@ -718,13 +881,20 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 				else:
 					move_start = _move_record(selected)
 				gizmo_axis = axis
+				last_click = {}
 				return
 			var plus := _pick_plus(aim)
 			if plus >= 0:
 				_add_note_beside(selected, plus)
+				last_click = {}
 				return
 			var hit := _pick(aim)
-			if e.double_click:
+			var dir := camera.project_ray_normal(aim)
+			var same_target: bool = not last_click.is_empty() and last_click["id"] == (hit.id if hit else -1) \
+					and (hit != null or dir.angle_to(last_click["dir"]) < DOUBLE_CLICK_ANGLE)
+			last_click = {"id": hit.id if hit else -1, "dir": dir}
+			if e.double_click and same_target:
+				last_click = {}  # a third quick click starts over
 				_end_drag()
 				if hit:
 					_open_editor(hit)
@@ -926,6 +1096,8 @@ func _on_key(e: InputEventKey) -> void:
 		KEY_G:
 			guides.visible = not guides.visible
 			grid.visible = guides.visible
+		KEY_B:
+			_open_ai_panel("edit" if e.shift_pressed else "breakdown")
 		KEY_H, KEY_F1:
 			help_panel.visible = not help_panel.visible
 		KEY_S:
@@ -1181,6 +1353,8 @@ func _step_history(from: Array[Dictionary], to: Array[Dictionary], verb: String)
 ## - "create" removes the cube; reversed by "delete" (with all its data).
 ## - "move" eases the cube to the stored place / rotation; reversed by a
 ##   "move" back to where it is now.
+## - "links" puts the link list back (between cubes that exist); reversed by
+##   "links" with the list as it is now.
 func _apply_history(d: Dictionary) -> Dictionary:
 	if d["type"] == "group":
 		# Apply back to front; the reverse group undoes them back to front again.
@@ -1194,6 +1368,11 @@ func _apply_history(d: Dictionary) -> Dictionary:
 	if d["type"] == "delete":
 		_restore_deleted(d)
 		return {"type": "create", "id": d["id"]}
+	if d["type"] == "links":
+		var current := {"type": "links", "links": links.duplicate(true)}
+		links = d["links"].filter(func(l): return notes.has(l[0]) and notes.has(l[1]))
+		_mark_dirty()
+		return current
 	var n: NoteScript = notes.get(d["id"])
 	if n == null:
 		return {}
@@ -1354,7 +1533,7 @@ func _build_gizmo() -> void:
 ## or being dragged.
 func _update_gizmo() -> void:
 	var shown := selected != null and is_instance_valid(selected) \
-			and dragging == null and not editor_panel.visible and not paused
+			and dragging == null and not _panel_open() and not paused
 	gizmo.visible = shown
 	if not shown:
 		return
@@ -1411,7 +1590,7 @@ func _drag_gizmo(relative: Vector2) -> void:
 ## notes do) and highlights the one under the crosshair.
 func _update_plus_buttons() -> void:
 	var shown := selected != null and is_instance_valid(selected) \
-			and dragging == null and not editor_panel.visible and not paused
+			and dragging == null and not _panel_open() and not paused
 	var hovered := _pick_plus(_aim_pos()) if shown else -1
 	var b := camera.global_transform.basis
 	var blocked: Array = _blocked_faces(selected) if shown else []
@@ -1551,16 +1730,8 @@ func _show_new_confirm(on: bool) -> void:
 	new_confirm.visible = on
 
 
-## Pause menu Exit: saves and quits.
-func _exit() -> void:
-	_save()
-	get_tree().quit()
-
-
-## Clears every block and link and starts over with the first-run blocks and
-## the starting view. The old notespace is one undo step ("new notespace").
-## Ids keep counting up, so undo can bring the old blocks back without clashes.
-func _new_notespace() -> void:
+## Removes every block and link, and returns the undo entries that bring them back.
+func _clear_space() -> Array:
 	_end_drag()
 	_commit_move()
 	_finish_easing()
@@ -1573,6 +1744,20 @@ func _new_notespace() -> void:
 	for n in notes.values():
 		_delete_note(n)
 	links.clear()
+	return entries
+
+
+## Pause menu Exit: saves and quits.
+func _exit() -> void:
+	_save()
+	get_tree().quit()
+
+
+## Clears every block and link and starts over with the first-run blocks and
+## the starting view. The old notespace is one undo step ("new notespace").
+## Ids keep counting up, so undo can bring the old blocks back without clashes.
+func _new_notespace() -> void:
+	var entries := _clear_space()
 	_create_welcome_notes()
 	for n in notes.values():
 		entries.append({"type": "create", "id": n.id})
@@ -1679,6 +1864,579 @@ func _on_editor_delete() -> void:
 	_capture_mouse()
 	if n and is_instance_valid(n):
 		_delete_note(n, true)
+
+
+# --- Task breakdown ---------------------------------------------------------
+
+## The note editor or the breakdown panel is up: the 3D view ignores input.
+func _panel_open() -> bool:
+	return editor_panel.visible or ai_panel.visible
+
+
+## The env var wins; otherwise the key typed in here earlier, if any.
+func _ai_key() -> String:
+	var k := OS.get_environment("ANTHROPIC_API_KEY").strip_edges()
+	if k == "":
+		var cfg := ConfigFile.new()
+		if cfg.load(SETTINGS_PATH) == OK:
+			k = str(cfg.get_value("anthropic", "api_key", "")).strip_edges()
+	return k
+
+
+## Saves (or with "", forgets) the typed-in API key, keeping other settings.
+func _store_ai_key(k: String) -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS_PATH)  # fine if it doesn't exist yet
+	if k == "":
+		if cfg.has_section_key("anthropic", "api_key"):
+			cfg.erase_section_key("anthropic", "api_key")
+	else:
+		cfg.set_value("anthropic", "api_key", k)
+	if cfg.save(SETTINGS_PATH) != OK:
+		push_warning("Could not save %s" % SETTINGS_PATH)
+
+
+## Opens the AI panel for "breakdown" (Break down a task) or "edit" (Add with AI).
+func _open_ai_panel(mode: String) -> void:
+	if paused:
+		_set_paused(false)
+	_end_drag()
+	orbiting = false
+	panning = false
+	if mode != ai_mode and not ai_busy:
+		ai_drafts[ai_mode] = ai_prompt.text
+		ai_mode = mode
+		ai_prompt.text = ai_drafts.get(mode, "")
+	var breakdown := ai_mode == "breakdown"
+	ai_title.text = _shortcut_text(("Break down a task" if breakdown else "Add with AI")
+		+ "   (Ctrl+Enter to generate, Esc to close)")
+	ai_about.text = ("Describe a big task. Claude splits it into groups of tasks and subtasks and lays them out as linked blocks in a new notespace."
+		if breakdown else
+		"Say what to add or change. Claude sees all your blocks and adds, rewrites, links, marks or removes blocks to match.")
+	ai_prompt.placeholder_text = ("e.g. Launch a small online shop for my ceramics" if breakdown
+		else "e.g. Add a group for marketing, and mark Set prices as done")
+	ai_key_edit.visible = _ai_key() == ""
+	if not ai_busy:
+		ai_status.text = ""
+		_set_ai_busy(false)  # sets the Generate button's text for this mode
+	_show_ai_confirm(false)
+	ai_panel.visible = true
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	ai_prompt.grab_focus()
+
+
+## Closing also drops a request that's still running.
+func _close_ai_panel() -> void:
+	if ai_busy:
+		ai_http.cancel_request()
+		_set_ai_busy(false)
+	ai_prompt.release_focus()
+	ai_key_edit.release_focus()
+	ai_panel.visible = false
+	_capture_mouse()
+
+
+func _set_ai_busy(on: bool) -> void:
+	ai_busy = on
+	ai_generate_btn.disabled = on
+	if on:
+		ai_generate_btn.text = "Thinking…"
+	else:
+		ai_generate_btn.text = "Generate blocks" if ai_mode == "breakdown" else "Apply"
+
+
+## Swaps the Cancel / Generate row for the "erase everything?" step.
+func _show_ai_confirm(on: bool) -> void:
+	ai_buttons.visible = not on
+	ai_confirm.visible = on
+
+
+## Generate / Ctrl+Enter. Breaking down over existing blocks asks first;
+## `confirmed` is the answer. Nothing is erased until the answer arrives.
+func _ai_generate(confirmed: bool = false) -> void:
+	if ai_busy:
+		return
+	var request := ai_prompt.text.strip_edges()
+	if request == "":
+		ai_status.text = "Describe the task first." if ai_mode == "breakdown" else "Say what to add or change first."
+		return
+	if ai_key_edit.visible and ai_key_edit.text.strip_edges() != "":
+		_store_ai_key(ai_key_edit.text.strip_edges())
+		ai_key_edit.text = ""
+	var key := _ai_key()
+	if key == "":
+		ai_status.text = "Paste an Anthropic API key first (or set ANTHROPIC_API_KEY)."
+		return
+	if ai_mode == "breakdown" and not notes.is_empty() and not confirmed:
+		_show_ai_confirm(true)
+		return
+	_show_ai_confirm(false)
+	var system := AI_SYSTEM
+	var content := request
+	var schema := _breakdown_schema()
+	if ai_mode == "edit":
+		system = AI_EDIT_SYSTEM
+		content = "Current blocks:\n%s\n\nRequest: %s" % [JSON.stringify(_space_for_ai()), request]
+		schema = _edit_schema()
+	var body := {
+		"model": AI_MODEL,
+		"max_tokens": 16000,
+		"system": system,
+		"thinking": {"type": "adaptive"},
+		"messages": [{"role": "user", "content": content}],
+		"output_config": {
+			"effort": "medium",
+			"format": {"type": "json_schema", "schema": schema},
+		},
+		# If a safety check declines the request, the API retries it on its recommended fallback model.
+		"fallbacks": "default",
+	}
+	var headers := [
+		"content-type: application/json",
+		"x-api-key: " + key,
+		"anthropic-version: 2023-06-01",
+		"anthropic-beta: server-side-fallback-2026-07-01",
+	]
+	var err := ai_http.request(AI_URL, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
+	if err != OK:
+		ai_status.text = "Couldn't start the request: %s" % error_string(err)
+		return
+	ai_status.text = "Asking Claude… this can take a little while."
+	_set_ai_busy(true)
+	_toast("Thinking…")
+
+
+## A JSON schema object whose listed properties are all required, and nothing else allowed.
+func _strict_object(props: Dictionary) -> Dictionary:
+	return {"type": "object", "properties": props, "required": props.keys(),
+		"additionalProperties": false}
+
+
+func _breakdown_schema() -> Dictionary:
+	var task := _strict_object({
+		"text": {"type": "string"},
+		"subtasks": {"type": "array", "items": {"type": "string"}},
+	})
+	var group := _strict_object({
+		"title": {"type": "string"},
+		"tasks": {"type": "array", "items": task},
+	})
+	return _strict_object({"groups": {"type": "array", "items": group}})
+
+
+func _edit_schema() -> Dictionary:
+	var pair := _strict_object({"from": {"type": "string"}, "to": {"type": "string"}})
+	return _strict_object({
+		"summary": {"type": "string"},
+		"add": {"type": "array", "items": _strict_object({
+			"temp_id": {"type": "string"},
+			"text": {"type": "string"},
+			"parent": {"type": "string"},
+			"color": {"type": "integer"},
+		})},
+		"edit": {"type": "array", "items": _strict_object({
+			"id": {"type": "string"}, "text": {"type": "string"}})},
+		"mark": {"type": "array", "items": _strict_object({
+			"id": {"type": "string"},
+			"state": {"type": "string", "enum": ["done", "failed", "none"]},
+		})},
+		"recolor": {"type": "array", "items": _strict_object({
+			"id": {"type": "string"}, "color": {"type": "integer"}})},
+		"link": {"type": "array", "items": pair},
+		"unlink": {"type": "array", "items": pair},
+		"remove": {"type": "array", "items": {"type": "string"}},
+	})
+
+
+## The current blocks and links, as Claude sees them for Add with AI.
+func _space_for_ai() -> Dictionary:
+	var blocks: Array = []
+	var ids: Array = notes.keys()
+	ids.sort()
+	for id in ids:
+		var n: NoteScript = notes[id]
+		var p := n.global_position
+		blocks.append({"id": str(id), "text": n.text, "status": n.status if n.status != "" else "none",
+			"color": palette.find(n.color),
+			"pos": [snappedf(p.x, 0.1), snappedf(p.y, 0.1), snappedf(p.z, 0.1)]})
+	var pairs: Array = []
+	for l in links:
+		pairs.append([str(l[0]), str(l[1])])
+	return {"blocks": blocks, "links": pairs}
+
+
+func _on_ai_response(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	_set_ai_busy(false)
+	if result != HTTPRequest.RESULT_SUCCESS:
+		ai_status.text = "Couldn't reach the Anthropic API (%s)." % (
+			"timed out" if result == HTTPRequest.RESULT_TIMEOUT else "network error %d" % result)
+		_toast(ai_status.text)
+		return
+	var data = JSON.parse_string(body.get_string_from_utf8())
+	if typeof(data) != TYPE_DICTIONARY:
+		ai_status.text = "The API sent back something unreadable (HTTP %d)." % code
+		return
+	if code != 200:
+		var msg := str(data.get("error", {}).get("message", "")) if data.get("error") is Dictionary else ""
+		ai_status.text = "API error %d: %s" % [code, msg]
+		_toast("API error %d" % code)
+		if code == 401:
+			# A bad saved key: forget it so the field comes back.
+			_store_ai_key("")
+			ai_key_edit.visible = _ai_key() == ""
+		return
+	var problem := _apply_ai_message(data)
+	if problem != "":
+		ai_status.text = problem
+		_toast(problem)
+		return
+	ai_prompt.text = ""
+	_close_ai_panel()
+
+
+## Turns a successful Messages API response into blocks, for the current mode.
+## Returns what went wrong, or "" once the changes are in.
+func _apply_ai_message(data: Dictionary) -> String:
+	var stop := str(data.get("stop_reason", ""))
+	if stop == "refusal":
+		return "Claude declined this one. Try describing it differently."
+	if stop == "max_tokens":
+		return "Claude's answer got too long. Try asking for less at once."
+	var text := ""
+	for block in data.get("content", []):
+		if block is Dictionary and block.get("type") == "text":
+			text = str(block.get("text", ""))  # thinking blocks are skipped; the last text block is the answer
+	var json := JSON.new()  # unlike JSON.parse_string(), doesn't log an error for bad text
+	var parsed = json.data if json.parse(text) == OK else null
+	if not (parsed is Dictionary):
+		return "Claude's answer couldn't be read. Try again."
+	if ai_mode == "edit":
+		return _apply_ai_edit(parsed)
+	if not (parsed.get("groups") is Array) or parsed["groups"].is_empty():
+		return "Claude's answer couldn't be read as blocks. Try again."
+	# A new notespace: the old blocks go, as part of the same undo step.
+	var view := rig.to_dict()
+	var entries := _clear_space()
+	rig.reset()
+	var made := _build_breakdown(parsed["groups"])
+	if made.is_empty():
+		for e in entries:
+			_restore_deleted(e)  # nothing usable came back: keep what was there
+		_select(null)
+		rig.from_dict(view)
+		return "Claude's answer had no blocks in it. Try again."
+	entries.append_array(made)
+	_push_undo({"type": "group", "entries": entries, "label": "AI breakdown"})
+	_save()
+	_toast(_shortcut_text("Added %d blocks · Ctrl+Z brings the old ones back" % made.size()))
+	return ""
+
+
+## Lays the breakdown out in front of the camera, facing it, pushed back until
+## it's clear of existing cubes, and turns the view level onto it. Returns
+## the undo entries for the blocks it made.
+func _build_breakdown(groups: Array) -> Array:
+	# Flatten to [x, y, text, color, parent index] in layout space (x right, y up).
+	var items: Array = []
+	var slots := 0
+	var max_subs := 0
+	var clean: Array = []
+	for g in groups.slice(0, 8):
+		if not (g is Dictionary):
+			continue
+		var tasks: Array = []
+		for t in (g.get("tasks", []) as Array).slice(0, 8):
+			if t is Dictionary and str(t.get("text", "")).strip_edges() != "":
+				var subs: Array = []
+				for s in (t.get("subtasks", []) as Array).slice(0, 6):
+					if str(s).strip_edges() != "":
+						subs.append(str(s).strip_edges())
+				tasks.append({"text": str(t["text"]).strip_edges(), "subs": subs})
+				max_subs = maxi(max_subs, subs.size())
+		clean.append({"title": str(g.get("title", "")).strip_edges(), "tasks": tasks})
+		slots += maxi(tasks.size(), 1)
+	var width := slots * BD_TASK_STEP + maxi(clean.size() - 1, 0) * BD_GROUP_GAP
+	var height := BD_TITLE_DROP + max_subs * PLUS_NEW_OFFSET
+	var x := -width * 0.5
+	var top := height * 0.5
+	for gi in clean.size():
+		var g: Dictionary = clean[gi]
+		var color := palette[gi % (palette.size() - 1)]  # every color but white
+		var n_slots := maxi(g["tasks"].size(), 1)
+		var title_i := items.size()
+		items.append([x + n_slots * BD_TASK_STEP * 0.5, top, g["title"], color, -1])
+		for ti in g["tasks"].size():
+			var t: Dictionary = g["tasks"][ti]
+			var tx: float = x + (ti + 0.5) * BD_TASK_STEP
+			var task_i := items.size()
+			items.append([tx, top - BD_TITLE_DROP, t["text"], color, title_i])
+			for si in t["subs"].size():
+				items.append([tx, top - BD_TITLE_DROP - (si + 1) * PLUS_NEW_OFFSET,
+					t["subs"][si], color, task_i])
+		x += n_slots * BD_TASK_STEP + BD_GROUP_GAP
+
+	var flat := Basis(Vector3.UP, rig.yaw)
+	var cam_pos := camera.global_position
+	var dist := maxf(BD_MIN_DIST, maxf(width * 0.65, height * 1.2))
+	var center := cam_pos
+	for attempt in 40:
+		center = cam_pos - flat.z * dist
+		var clear := true
+		for it in items:
+			var p: Vector3 = center + flat.x * float(it[0]) + Vector3.UP * float(it[1])
+			for v in notes.values():
+				if (v as NoteScript).global_position.distance_to(p) < SPACING:
+					clear = false
+					break
+			if not clear:
+				break
+		if clear:
+			break
+		dist += 4.0
+
+	var made: Array[NoteScript] = []
+	var entries: Array = []
+	for it in items:
+		if str(it[2]) == "":
+			made.append(null)
+			continue
+		var parent: int = it[4]
+		var target: Vector3 = center + flat.x * float(it[0]) + Vector3.UP * float(it[1])
+		# Blocks grow out of their group's title block (parents are still at their start).
+		var start := made[parent].global_position if parent >= 0 and made[parent] else target
+		var n := _create_note(start, it[2], it[3])
+		n.rotation = Vector3(0.0, rig.yaw, 0.0)
+		n.refresh()
+		_ease_note(n, target, n.quaternion, BD_EASE_TIME)
+		made.append(n)
+		entries.append({"type": "create", "id": n.id})
+		if parent >= 0 and made[parent]:
+			_toggle_link(made[parent], n)
+	if not entries.is_empty():
+		rig.frame(center, dist)
+	return entries
+
+
+## Add with AI: applies Claude's changes as one undo step. Ids that don't
+## match a block are skipped. Returns what went wrong, or "".
+func _apply_ai_edit(r: Dictionary) -> String:
+	_end_drag()
+	_commit_move()
+	_finish_easing()
+	var by_id := {}  # Claude's ids (existing block ids and new temp_ids) -> block
+	for id in notes:
+		by_id[str(id)] = notes[id]
+	var entries: Array = [{"type": "links", "links": links.duplicate(true)}]
+	var changed: Array[NoteScript] = []  # existing blocks that were edited, to pulse
+	var counts := {"added": 0, "edited": 0, "marked": 0, "recolored": 0, "linked": 0, "unlinked": 0, "removed": 0}
+
+	for item in _ai_list(r, "edit"):
+		var n: NoteScript = by_id.get(str(item.get("id", "")))
+		var t := str(item.get("text", "")).strip_edges()
+		if n and t != "" and t != n.text:
+			entries.append(_edit_record(n))
+			n.text = t
+			n.refresh()
+			_add_unique(changed, n)
+			counts["edited"] += 1
+	for item in _ai_list(r, "mark"):
+		var n: NoteScript = by_id.get(str(item.get("id", "")))
+		var state := str(item.get("state", ""))
+		var st := "" if state == "none" else state
+		if n and st in ["", "done", "failed"] and st != n.status:
+			entries.append(_edit_record(n))
+			n.status = st
+			n.refresh()
+			_add_unique(changed, n)
+			counts["marked"] += 1
+	for item in _ai_list(r, "recolor"):
+		var n: NoteScript = by_id.get(str(item.get("id", "")))
+		var ci := int(item.get("color", -1))
+		if n and ci >= 0 and ci < palette.size() and palette[ci] != n.color:
+			entries.append(_edit_record(n))
+			n.color = palette[ci]
+			n.refresh()
+			_add_unique(changed, n)
+			counts["recolored"] += 1
+
+	# New blocks: placed (in order, parents first) next to their parent, or as a
+	# new group in free space in front of the camera.
+	var new_notes: Array[NoteScript] = []
+	var grow_from := {}  # new block -> where it eases in from
+	for item in _ai_list(r, "add"):
+		var t := str(item.get("text", "")).strip_edges()
+		var temp := str(item.get("temp_id", "")).strip_edges()
+		if t == "" or (temp != "" and by_id.has(temp)):
+			continue
+		var parent: NoteScript = by_id.get(str(item.get("parent", "")))
+		var ci := int(item.get("color", -1))
+		var color := palette[ci] if ci >= 0 and ci < palette.size() else (parent.color if parent else last_color)
+		var pos := _ai_child_spot(parent) if parent else _ai_cluster_spot()
+		var n := _create_note(pos, t, color)
+		n.quaternion = parent.quaternion if parent else Quaternion(Vector3.UP, rig.yaw)
+		n.refresh()
+		if parent:
+			_toggle_link(parent, n)
+			grow_from[n] = parent.global_position
+		if temp != "":
+			by_id[temp] = n
+		new_notes.append(n)
+		entries.append({"type": "create", "id": n.id})
+		counts["added"] += 1
+
+	for item in _ai_list(r, "link"):
+		var a: NoteScript = by_id.get(str(item.get("from", "")))
+		var b: NoteScript = by_id.get(str(item.get("to", "")))
+		if a and b and a != b and not _linked(a, b):
+			_toggle_link(a, b)
+			counts["linked"] += 1
+	for item in _ai_list(r, "unlink"):
+		var a: NoteScript = by_id.get(str(item.get("from", "")))
+		var b: NoteScript = by_id.get(str(item.get("to", "")))
+		if a and b and _linked(a, b):
+			_toggle_link(a, b)
+			counts["unlinked"] += 1
+	var removed_spots: Array[Vector3] = []
+	for id in _ai_list(r, "remove"):
+		var n: NoteScript = by_id.get(str(id))
+		if is_instance_valid(n) and notes.has(n.id):
+			entries.append(_delete_record(n))
+			removed_spots.append(n.global_position)
+			changed.erase(n)
+			new_notes.erase(n)
+			_delete_note(n)
+			counts["removed"] += 1
+
+	var total := 0
+	for k in counts:
+		total += counts[k]
+	if total == 0:
+		var note := str(r.get("summary", "")).strip_edges()
+		return "Claude didn't change anything." + (" " + note if note != "" else "")
+	_push_undo({"type": "group", "entries": entries, "label": "AI edit"})
+
+	# Show what happened: new blocks grow out of their parent, edited ones pulse,
+	# and the view turns onto all of it.
+	var spots: Array[Vector3] = removed_spots.duplicate()
+	for n in new_notes:
+		var target := n.global_position
+		spots.append(target)
+		if grow_from.has(n):
+			n.global_position = grow_from[n]
+		_ease_note(n, target, n.quaternion, BD_EASE_TIME)
+	for n in changed:
+		spots.append(n.global_position)
+		_pulse(n)
+	_frame_spots(spots)
+	_mark_dirty()
+
+	var parts: Array[String] = []
+	for k in counts:
+		if counts[k] > 0:
+			parts.append("%s %d" % [k, counts[k]])
+	parts[0] = parts[0].capitalize()
+	_toast(_shortcut_text(", ".join(parts) + " · Ctrl+Z undoes it"))
+	return ""
+
+
+## r[key] if it's a list, else an empty one (so a malformed answer is just skipped).
+func _ai_list(r: Dictionary, key: String) -> Array:
+	return r[key] if r.get(key) is Array else []
+
+
+func _add_unique(list: Array[NoteScript], n: NoteScript) -> void:
+	if not list.has(n):
+		list.append(n)
+
+
+func _linked(a: NoteScript, b: NoteScript) -> bool:
+	return links.has([mini(a.id, b.id), maxi(a.id, b.id)])
+
+
+func _spot_free(p: Vector3) -> bool:
+	for v in notes.values():
+		if (v as NoteScript).global_position.distance_to(p) < SPACING - 0.01:
+			return false
+	return true
+
+
+## Where a new block under `parent` goes: continuing the column or row its
+## existing lower children form (subtasks stack down, tasks sit side by side),
+## or right below it if it has none; failing that, the nearest free spot
+## against one of its sides.
+func _ai_child_spot(parent: NoteScript) -> Vector3:
+	var pp := parent.global_position
+	var right := parent.global_transform.basis.x
+	right.y = 0.0
+	right = right.normalized() if right.length() > 0.01 else Basis(Vector3.UP, rig.yaw).x
+	var fwd := right.cross(Vector3.UP)
+	var kids: Array[Vector3] = []
+	for l in links:
+		if l[0] == parent.id or l[1] == parent.id:
+			var other: NoteScript = notes.get(l[1] if l[0] == parent.id else l[0])
+			if other and other.global_position.y < pp.y - 1.0:
+				kids.append(other.global_position)
+	var tries: Array[Vector3] = []
+	if kids.is_empty():
+		tries.append(pp + Vector3.DOWN * PLUS_NEW_OFFSET)
+	else:
+		var column := true
+		var lowest := kids[0]
+		var rightmost := kids[0]
+		for k in kids:
+			column = column and absf((k - pp).dot(right)) < 0.5
+			if k.y < lowest.y:
+				lowest = k
+			if (k - pp).dot(right) > (rightmost - pp).dot(right):
+				rightmost = k
+		for i in range(1, 7):
+			if column:
+				tries.append(lowest + Vector3.DOWN * PLUS_NEW_OFFSET * i)
+			else:
+				tries.append(rightmost + right * BD_TASK_STEP * i)
+	for i in range(1, 7):
+		for d in [Vector3.DOWN, right, -right, Vector3.UP, fwd, -fwd]:
+			tries.append(pp + d * PLUS_NEW_OFFSET * i)
+	for p in tries:
+		if _spot_free(p):
+			return p
+	return _free_spot(null, pp)
+
+
+## Where a new top-level group goes: in front of the camera, at least
+## AI_CLUSTER_GAP from every block, trying spots side to side and then farther back.
+func _ai_cluster_spot() -> Vector3:
+	var flat := Basis(Vector3.UP, rig.yaw)
+	var base := camera.global_position - flat.z * BD_MIN_DIST
+	for back in 10:
+		for side in [0, 1, -1, 2, -2, 3, -3]:
+			var p: Vector3 = base + flat.x * (side * AI_CLUSTER_GAP) - flat.z * (back * AI_CLUSTER_GAP)
+			var clear := true
+			for v in notes.values():
+				if (v as NoteScript).global_position.distance_to(p) < AI_CLUSTER_GAP:
+					clear = false
+					break
+			if clear:
+				return p
+	return _free_spot(null, base)
+
+
+## A quick swell and settle, to show a block was changed.
+func _pulse(n: NoteScript) -> void:
+	var tween := n.create_tween()
+	tween.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	tween.tween_property(n, "scale", Vector3.ONE * AI_PULSE, 0.2)
+	tween.tween_property(n, "scale", Vector3.ONE, 0.35)
+
+
+## Turns the view level onto a set of points, far enough back to see them all.
+func _frame_spots(spots: Array[Vector3]) -> void:
+	if spots.is_empty():
+		return
+	var box := AABB(spots[0], Vector3.ZERO)
+	for p in spots:
+		box = box.expand(p)
+	rig.frame(box.get_center(), maxf(BD_MIN_DIST, box.size.length() * 0.8 + NoteScript.SIZE))
 
 
 # --- Mouse capture & pause --------------------------------------------------
@@ -1836,5 +2594,5 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST and dirty:
 		_save()
 	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT and pause_panel \
-			and not paused and not editor_panel.visible:
+			and not paused and not _panel_open():
 		_set_paused(true)  # alt-tabbed away: free the cursor

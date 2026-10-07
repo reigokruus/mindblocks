@@ -46,6 +46,8 @@ On macOS, use Cmd wherever this says Ctrl (Cmd+Z, Cmd+C, Cmd+Enter…); the in-a
 | Fly | W A S D, Q / E for down / up, Shift = faster |
 | Fly up / down | Space or E / Q |
 | Toggle floor guides | G |
+| Break down a task with AI | B, or Esc → Break down a task: describe a big task, and Claude lays it out as linked blocks in a new notespace (groups of tasks, each with its subtasks below it). If there are blocks already, it asks before erasing them. Ctrl+Enter generates; Ctrl+Z brings the old blocks back. Needs an Anthropic API key, see below |
+| Add or change blocks with AI | Shift+B, or Esc → Add with AI: say what to add or change, and Claude adds, rewrites, links / unlinks, marks, recolors or removes blocks in the current space. New blocks appear next to the block they belong under; changed ones pulse. Ctrl+Z undoes it all in one step |
 | Toggle help | H (hidden at start; a small "H to toggle help" note bottom left is always shown) |
 
 Closing the editor on an empty note deletes it.
@@ -69,12 +71,44 @@ With no save at all, the app starts with four linked blocks explaining the basic
 It's plain JSON: notes (id, text, color, position, status), links (pairs of ids),
 and the camera position.
 
+## AI: break down a task, add with AI
+
+Both use Claude (`claude-opus-5-5`, through the Anthropic Messages API) and
+return structured JSON that the app turns into blocks.
+
+**Break down a task** (B) starts a new notespace. Claude splits a big task
+into 2–6 groups of related work: each group has a title, its tasks and their
+subtasks. The group title sits on top, its tasks in a row below it, and each
+task's subtasks are stacked under that task. Links connect title → task →
+subtask, each group gets its own color, and groups are farther apart than the
+blocks inside them. If the space already has blocks, the panel asks before
+erasing them. They're only erased once Claude's answer has arrived, and the
+whole swap is one undo step.
+
+**Add with AI** (Shift+B) sends Claude every block (id, text, done / failed,
+color, position) and link, along with what you ask for. Claude answers with
+changes: new blocks (each under a parent block, or as a new group), rewritten
+texts, done / failed marks, colors, new or removed links, and removed blocks.
+A new block goes next to its parent. It continues the column or row the
+parent's other children form (subtasks stack down, tasks sit side by side), or
+goes right below a parent with no children yet. A new group gets its own spot
+in front of you, clear of everything else. Ids that don't match a block are
+skipped. Everything is one undo step, and a message says what changed.
+
+Both need an Anthropic API key. If `ANTHROPIC_API_KEY` is set, that one is used.
+Otherwise the panel asks for one once and keeps it in `user://settings.cfg` (in
+the same folder as `notes.json`, never in the notes or the repo). Delete that
+file to forget the key. A key the API rejects is forgotten automatically.
+
+If Claude's safety checks decline a request, the API retries it on its
+recommended fallback model (`fallbacks: "default"`).
+
 ## How it's built
 
 ```
 project.godot        GL Compatibility renderer, so it runs on laptops, phones and the web
 main.tscn            one Node3D with main.gd; everything else is built in code
-scripts/main.gd      environment, input, picking, dragging, links, editor UI, save/load
+scripts/main.gd      environment, input, picking, dragging, links, editor UI, AI breakdown, save/load
 scripts/note.gd      one note: a cube with Label3D text on every face, outline, done/failed marks
 scripts/camera_rig.gd orbit / pan / zoom / fly camera
 ```

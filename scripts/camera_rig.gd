@@ -70,6 +70,14 @@ func focus(target: Vector3) -> void:
 	_apply()
 
 
+## Looks level at `target` from `dist` away, keeping the heading.
+func frame(target: Vector3, dist: float) -> void:
+	position = target
+	pitch = 0.0
+	distance = clampf(dist, MIN_DISTANCE, MAX_DISTANCE)
+	_apply()
+
+
 func _process(delta: float) -> void:
 	if input_blocked:
 		return
