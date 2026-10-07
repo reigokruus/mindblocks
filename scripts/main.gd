@@ -131,18 +131,26 @@ New blocks: give each a temp_id like "n1" and a parent: the id or temp_id of the
 Keep every text short enough to fit on a cube face: at most 60 characters, no numbering or bullet characters.
 Colors are 0 yellow, 1 pink, 2 blue, 3 green, 4 orange, 5 purple, 6 white; use -1 for a new block to take its parent's color.
 Use empty lists for kinds of change you don't need. summary: one short sentence on what you changed. Write in the same language as the request."""
-## Breakdown layout, seen from the front: groups side by side, each with its
-## title block on top, its tasks in a row under that, and each task's subtasks
-## stacked flush under the task (snap spacing). Tasks have a small gap between
-## them so each task's column reads on its own; groups are 2.5 cube widths apart.
-const BD_TASK_STEP := 3.2
-const BD_TITLE_DROP := 3.6
+## AI layouts grow like a 3D mind map, the way blocks look when arranged by
+## hand: a group's tasks spread out around and below its title block, in all
+## directions including depth, and each task's subtasks fan out the same way
+## around it, continuing away from the title. Every new block goes FAN_DISTS
+## from its parent, in the most open direction on a cone (FAN_TILTS from the
+## outward direction), at least FAN_CLEAR from every other block; a bit of
+## randomness keeps it from looking machine-made. Groups sit side by side,
+## BD_GROUP_GAP apart.
+const FAN_DISTS: Array[float] = [5.0, 6.5, 8.0]
+const FAN_TILTS: Array[float] = [0.6, 1.0]  # radians from the outward direction
+const FAN_STEPS := 12  # directions tried around the cone
+const FAN_CLEAR := 3.4
+const FAN_ROOM := 6.0  # more clearance than this doesn't make a spot any better
+const FAN_JITTER := 0.5
 const BD_GROUP_GAP := 5.0
 const BD_MIN_DIST := 12.0
 const BD_EASE_TIME := 0.6
 ## Add with AI: how far apart new top-level groups are kept from everything
 ## else, and how much changed blocks swell when they pulse.
-const AI_CLUSTER_GAP := 6.0
+const AI_CLUSTER_GAP := 10.0
 const AI_PULSE := 1.2
 
 const HELP_TEXT := """Mouse — look around · clicks act at the crosshair
@@ -154,11 +162,12 @@ Drag a colored arrow — move selected cube along that axis
 Moving near another cube shows a ghost: let go to snap there (Shift = don't)
 R + mouse — rotate selected cube · arrow keys — turn it 90° · R R — straighten it
 Shift+click another note — link / unlink with selected
+Anchor blocks (thick dark frame) carry every block linked to them when moved · toggle in the editor
 1–7 — recolor selected · F — focus selected · Delete — delete
 Alt + drag a cube — drag out a copy · Ctrl+C / Ctrl+X / Ctrl+V — copy / cut / paste where you look
 Ctrl+Z — undo (blocks, moves, text edits…) · Ctrl+Y or Ctrl+Shift+Z — redo
 Right-drag — orbit · Middle-drag or Shift+right-drag — pan
-Scroll — zoom · W A S D / Q E — fly (Shift = faster)
+W A S D / Q E — fly (Shift = much faster) · scroll while orbiting — zoom
 Space — fly up
 G — floor guides on / off
 B — break down a task with Claude into a new notespace · Shift+B — add / change blocks with Claude
@@ -186,7 +195,7 @@ var last_color: Color
 ## {type: "move", id, pos, rot} (where the cube was before it moved / turned) or
 ## {type: "create", id} (a copied / pasted cube, which undo removes) or
 ## {type: "group", entries} (several steps undone / redone together) or
-## {type: "edit", id, text, color, status} (what a cube said / looked like) or
+## {type: "edit", id, text, color, status, anchor} (what a cube said / looked like) or
 ## {type: "links", links} (the whole link list, as it was).
 ## Every entry also has a "label" (e.g. "block move") for the undo message.
 var undo_stack: Array[Dictionary] = []
@@ -230,6 +239,10 @@ var last_r_press := -1.0
 ## The previous left click: {id (block hit, or -1), dir (aim ray)}, or {} after
 ## a click that can't start a double-click.
 var last_click: Dictionary = {}
+## While an anchor is moved: {anchor, offsets: {block: offset from the anchor},
+## tween (the anchor's ease after it's let go, if any)}. Every block linked to
+## the anchor, directly or through others, keeps its offset.
+var follow: Dictionary = {}
 ## Ctrl+C copies the selected cube here: {text, color, status, rot}.
 var clipboard: Dictionary = {}
 
@@ -242,6 +255,7 @@ var editor_text: TextEdit
 var editing: NoteScript = null
 var mark_done_btn: Button
 var mark_failed_btn: Button
+var anchor_btn: Button
 var pause_panel: Control
 var pause_buttons: Control  # Continue / New notespace
 var new_confirm: Control  # "Start a new notespace?" with its two buttons
@@ -473,6 +487,12 @@ func _build_ui() -> void:
 	mark_failed_btn.toggle_mode = true
 	mark_failed_btn.pressed.connect(_on_status_picked.bind("failed"))
 	row.add_child(mark_failed_btn)
+	anchor_btn = Button.new()
+	anchor_btn.text = "Anchor"
+	anchor_btn.toggle_mode = true
+	anchor_btn.tooltip_text = "Moving an anchor moves every block linked to it"
+	anchor_btn.pressed.connect(_on_anchor_toggled)
+	row.add_child(anchor_btn)
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(spacer)
@@ -696,6 +716,7 @@ func _process(delta: float) -> void:
 		if not held.is_equal_approx(dragging.global_position):
 			dragging.global_position = held
 			drag_moved = true
+	_update_follow()
 
 	rig.input_blocked = _panel_open() or paused
 	crosshair.visible = _mouse_captured()
@@ -880,6 +901,7 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 					move_start = {}  # undo removes the copy in one step
 				else:
 					move_start = _move_record(selected)
+					_start_follow(selected)
 				gizmo_axis = axis
 				last_click = {}
 				return
@@ -931,13 +953,13 @@ func _on_mouse_button(e: InputEventMouseButton) -> void:
 			if e.pressed:
 				if dragging:
 					_push_drag(-0.6)
-				else:
+				elif orbiting:
 					rig.zoom(0.9)
 		MOUSE_BUTTON_WHEEL_DOWN:
 			if e.pressed:
 				if dragging:
 					_push_drag(0.6)
-				else:
+				elif orbiting:
 					rig.zoom(1.1)
 
 
@@ -1169,6 +1191,7 @@ func _begin_drag(n: NoteScript) -> void:
 	dragging = n
 	drag_moved = false
 	move_start = _move_record(n)
+	_start_follow(n)
 	drag_local = camera.global_transform.basis.inverse() * (n.global_position - camera.global_position)
 
 
@@ -1191,7 +1214,17 @@ func _end_drag() -> void:
 	if dragging and drag_moved:
 		_mark_dirty()
 	dragging = null
-	if moved and not snap_target.is_empty() and not Input.is_key_pressed(KEY_SHIFT):
+	var snap := moved and not snap_target.is_empty() and not Input.is_key_pressed(KEY_SHIFT)
+	if moved and not follow.is_empty() and follow["anchor"] == moved:
+		# A whole stack: snap by the anchor, then shift everything clear of outside blocks.
+		var target: Vector3 = snap_target["pos"] if snap else moved.global_position
+		target += _stack_clearance(target)
+		if not target.is_equal_approx(moved.global_position) or snap:
+			follow["tween"] = _ease_note(moved, target,
+				snap_target["rot"] if snap else moved.quaternion, SNAP_TIME if snap else SETTLE_TIME)
+		else:
+			follow = {}
+	elif snap:
 		_ease_note(moved, snap_target["pos"], snap_target["rot"], SNAP_TIME)
 	elif moved:
 		_settle(moved)  # dropped inside / too close to another cube: float free
@@ -1199,6 +1232,101 @@ func _end_drag() -> void:
 	snap_ghost.visible = false
 	if not Input.is_key_pressed(KEY_R):
 		_commit_move()
+
+
+# --- Anchors ----------------------------------------------------------------
+
+## Every block linked to `n`, directly or through other blocks (not `n` itself).
+func _stack_of(n: NoteScript) -> Array[NoteScript]:
+	var neighbors := {}  # id -> linked ids
+	for l in links:
+		neighbors.get_or_add(l[0], []).append(l[1])
+		neighbors.get_or_add(l[1], []).append(l[0])
+	var seen := {n.id: true}
+	var queue: Array = [n.id]
+	var stack: Array[NoteScript] = []
+	while not queue.is_empty():
+		var id = queue.pop_back()
+		for other in neighbors.get(id, []):
+			if not seen.has(other) and notes.has(other):
+				seen[other] = true
+				queue.append(other)
+				stack.append(notes[other])
+	return stack
+
+
+## If `n` is an anchor, the blocks linked to it start following it, and their
+## places go into move_start so the move undoes as one step.
+func _start_follow(n: NoteScript) -> void:
+	if not follow.is_empty():
+		_finish_easing()  # a stack still easing from its last move lands first
+	follow = {}
+	if n == null or not n.anchor:
+		return
+	var offsets := {}
+	var records: Array = []
+	for m in _stack_of(n):
+		offsets[m] = m.global_position - n.global_position
+		records.append(_move_record(m))
+	if offsets.is_empty():
+		return
+	follow = {"anchor": n, "offsets": offsets}
+	move_start["followers"] = records
+
+
+## Keeps the stack at its offsets from the anchor; once the anchor has been
+## let go and has finished easing, the stack stops following.
+func _update_follow() -> void:
+	if follow.is_empty():
+		return
+	var a: NoteScript = follow["anchor"]
+	if not is_instance_valid(a) or not notes.has(a.id):
+		follow = {}
+		return
+	for m in follow["offsets"]:
+		if is_instance_valid(m) and notes.has(m.id):
+			var p: Vector3 = a.global_position + follow["offsets"][m]
+			if not p.is_equal_approx(m.global_position):
+				m.global_position = p
+				_mark_dirty()
+	var held := a == dragging or (gizmo_axis >= 0 and a == selected)
+	var tween: Tween = follow.get("tween")
+	if not held and (tween == null or not tween.is_running()):
+		follow = {}
+
+
+func _following(n: NoteScript) -> bool:
+	return not follow.is_empty() and follow["offsets"].has(n)
+
+
+## How far to shift the stack (anchor at `anchor_pos`, the rest at their
+## offsets) so none of its blocks end up too close to a block outside it.
+func _stack_clearance(anchor_pos: Vector3) -> Vector3:
+	var a: NoteScript = follow["anchor"]
+	var members: Array[Vector3] = [Vector3.ZERO]
+	for m in follow["offsets"]:
+		members.append(follow["offsets"][m])
+	var outside: Array[Vector3] = []
+	for v in notes.values():
+		if v != a and not follow["offsets"].has(v):
+			outside.append((v as NoteScript).global_position)
+	var shift := Vector3.ZERO
+	for iteration in 30:
+		var moved := false
+		for off in members:
+			var p: Vector3 = anchor_pos + shift + off
+			for o in outside:
+				var away := p - o
+				var dist := away.length()
+				if dist >= SPACING - 0.01:
+					continue
+				if dist < 0.01:
+					away = camera.global_transform.basis.x
+				shift += away.normalized() * (SPACING - dist)
+				moved = true
+		if not moved:
+			break
+	return shift
 
 
 # --- Snapping & neighbors ---------------------------------------------------
@@ -1258,7 +1386,7 @@ func _find_snap(m: NoteScript) -> Dictionary:
 	var best_dist := SNAP_DIST
 	for v in notes.values():
 		var n: NoteScript = v
-		if n == m or n.global_position.distance_to(p) > PLUS_NEW_OFFSET + SNAP_DIST:
+		if n == m or _following(n) or n.global_position.distance_to(p) > PLUS_NEW_OFFSET + SNAP_DIST:
 			continue
 		var slot := n.global_position + _face_dir(n, _face_toward(n, p)) * PLUS_NEW_OFFSET
 		var d := p.distance_to(slot)
@@ -1266,7 +1394,8 @@ func _find_snap(m: NoteScript) -> Dictionary:
 			continue
 		var free := true
 		for w in notes.values():
-			if w != m and w != n and (w as NoteScript).global_position.distance_to(slot) < SPACING - 0.01:
+			if w != m and w != n and not _following(w) \
+					and (w as NoteScript).global_position.distance_to(slot) < SPACING - 0.01:
 				free = false
 				break
 		if free:
@@ -1310,7 +1439,12 @@ func _commit_move() -> void:
 	if move_start.is_empty():
 		return
 	var n: NoteScript = notes.get(move_start["id"])
-	if n and not n.global_position.is_equal_approx(move_start["pos"]):
+	var followers: Array = move_start.get("followers", [])
+	move_start.erase("followers")
+	if n and not followers.is_empty() and not n.global_position.is_equal_approx(move_start["pos"]):
+		# An anchor carried its stack: one step puts every block back.
+		_push_undo({"type": "group", "entries": [move_start] + followers, "label": "stack move"})
+	elif n and not n.global_position.is_equal_approx(move_start["pos"]):
 		move_start["label"] = "block move"
 		_push_undo(move_start)
 	elif n and not n.quaternion.is_equal_approx(move_start["rot"]):
@@ -1381,6 +1515,7 @@ func _apply_history(d: Dictionary) -> Dictionary:
 		n.text = d["text"]
 		n.color = d["color"]
 		n.status = d["status"]
+		n.anchor = d.get("anchor", false)
 		n.refresh()
 		_select(n)
 		_mark_dirty()
@@ -1398,7 +1533,7 @@ func _apply_history(d: Dictionary) -> Dictionary:
 
 
 ## Eases cube `n` to a place and rotation, remembering it in `easing`.
-func _ease_note(n: NoteScript, pos: Vector3, rot: Quaternion, time: float) -> void:
+func _ease_note(n: NoteScript, pos: Vector3, rot: Quaternion, time: float) -> Tween:
 	var tween := n.create_tween().set_parallel()
 	tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	tween.tween_property(n, "global_position", pos, time)
@@ -1406,6 +1541,7 @@ func _ease_note(n: NoteScript, pos: Vector3, rot: Quaternion, time: float) -> vo
 	tween.finished.connect(_mark_dirty)
 	easing = easing.filter(func(e): return (e["tween"] as Tween).is_running())
 	easing.append({"tween": tween, "note": n, "pos": pos, "rot": rot})
+	return tween
 
 
 ## Jumps any cube that's still easing to where it's headed, so the next undo /
@@ -1419,6 +1555,7 @@ func _finish_easing() -> void:
 			e["note"].quaternion = e["rot"]
 			_mark_dirty()
 	easing.clear()
+	_update_follow()  # a stack whose anchor just jumped catches up, and stops following
 
 
 # --- Notes & links ----------------------------------------------------------
@@ -1446,6 +1583,7 @@ func _delete_record(n: NoteScript) -> Dictionary:
 		"text": n.text,
 		"color": n.color,
 		"status": n.status,
+		"anchor": n.anchor,
 		"rot": n.quaternion,
 		"pos": n.global_position,
 		"links": links.filter(func(l): return l[0] == n.id or l[1] == n.id),
@@ -1474,6 +1612,7 @@ func _delete_note(n: NoteScript, undoable: bool = false) -> void:
 func _restore_deleted(d: Dictionary) -> void:
 	var n := _create_note(d["pos"], d["text"], d["color"], d["id"])
 	n.status = d["status"]
+	n.anchor = d.get("anchor", false)
 	n.quaternion = d["rot"]
 	n.refresh()
 	for l in d["links"]:
@@ -1804,9 +1943,10 @@ func _close_editor() -> void:
 	_capture_mouse()
 
 
-## The cube's text, color and mark, as an undo "edit" entry.
+## The cube's text, color, mark and anchor flag, as an undo "edit" entry.
 func _edit_record(n: NoteScript) -> Dictionary:
-	return {"type": "edit", "id": n.id, "text": n.text, "color": n.color, "status": n.status}
+	return {"type": "edit", "id": n.id, "text": n.text, "color": n.color, "status": n.status,
+		"anchor": n.anchor}
 
 
 ## After the editor closes: if the cube's text, color or mark changed, records
@@ -1824,6 +1964,8 @@ func _push_edit(n: NoteScript) -> void:
 		edit_start["label"] = "color change"
 	elif n.status != edit_start["status"]:
 		edit_start["label"] = "mark change"
+	elif n.anchor != edit_start.get("anchor", false):
+		edit_start["label"] = "anchor change"
 	else:
 		return
 	_push_undo(edit_start)
@@ -1854,6 +1996,15 @@ func _sync_status_buttons() -> void:
 	var s := editing.status if editing else ""
 	mark_done_btn.set_pressed_no_signal(s == "done")
 	mark_failed_btn.set_pressed_no_signal(s == "failed")
+	anchor_btn.set_pressed_no_signal(editing != null and editing.anchor)
+
+
+func _on_anchor_toggled() -> void:
+	if editing and is_instance_valid(editing):
+		editing.anchor = not editing.anchor
+		editing.refresh()
+		_mark_dirty()
+		_sync_status_buttons()
 
 
 func _on_editor_delete() -> void:
@@ -2133,57 +2284,69 @@ func _apply_ai_message(data: Dictionary) -> String:
 
 
 ## Lays the breakdown out in front of the camera, facing it, pushed back until
-## it's clear of existing cubes, and turns the view level onto it. Returns
-## the undo entries for the blocks it made.
+## it's clear of existing cubes, and turns the view level onto it. Each group
+## is grown as a fan (see FAN_DISTS) around its title block, then the groups
+## are set side by side. Returns the undo entries for the blocks it made.
 func _build_breakdown(groups: Array) -> Array:
-	# Flatten to [x, y, text, color, parent index] in layout space (x right, y up).
+	# Each item: [local position, text, color, parent index]; local x is to the
+	# right of the view, y up, z toward the camera.
 	var items: Array = []
-	var slots := 0
-	var max_subs := 0
-	var clean: Array = []
+	var x := 0.0
+	var gi := 0
 	for g in groups.slice(0, 8):
 		if not (g is Dictionary):
 			continue
+		var title := str(g.get("title", "")).strip_edges()
+		var color := palette[gi % (palette.size() - 1)]  # every color but white
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash(title) + gi
+		var cluster: Array = [[Vector3.ZERO, title, color, -1]]
+		var placed: Array[Vector3] = [Vector3.ZERO]
 		var tasks: Array = []
 		for t in (g.get("tasks", []) as Array).slice(0, 8):
 			if t is Dictionary and str(t.get("text", "")).strip_edges() != "":
-				var subs: Array = []
-				for s in (t.get("subtasks", []) as Array).slice(0, 6):
-					if str(s).strip_edges() != "":
-						subs.append(str(s).strip_edges())
-				tasks.append({"text": str(t["text"]).strip_edges(), "subs": subs})
-				max_subs = maxi(max_subs, subs.size())
-		clean.append({"title": str(g.get("title", "")).strip_edges(), "tasks": tasks})
-		slots += maxi(tasks.size(), 1)
-	var width := slots * BD_TASK_STEP + maxi(clean.size() - 1, 0) * BD_GROUP_GAP
-	var height := BD_TITLE_DROP + max_subs * PLUS_NEW_OFFSET
-	var x := -width * 0.5
-	var top := height * 0.5
-	for gi in clean.size():
-		var g: Dictionary = clean[gi]
-		var color := palette[gi % (palette.size() - 1)]  # every color but white
-		var n_slots := maxi(g["tasks"].size(), 1)
-		var title_i := items.size()
-		items.append([x + n_slots * BD_TASK_STEP * 0.5, top, g["title"], color, -1])
-		for ti in g["tasks"].size():
-			var t: Dictionary = g["tasks"][ti]
-			var tx: float = x + (ti + 0.5) * BD_TASK_STEP
-			var task_i := items.size()
-			items.append([tx, top - BD_TITLE_DROP, t["text"], color, title_i])
-			for si in t["subs"].size():
-				items.append([tx, top - BD_TITLE_DROP - (si + 1) * PLUS_NEW_OFFSET,
-					t["subs"][si], color, task_i])
-		x += n_slots * BD_TASK_STEP + BD_GROUP_GAP
+				var p := _fan_spot(Vector3.ZERO, Vector3.DOWN, placed, rng)
+				placed.append(p)
+				cluster.append([p, str(t["text"]).strip_edges(), color, 0])
+				tasks.append([cluster.size() - 1, t])
+		# Subtasks after all the tasks, so the tasks get the first pick of directions.
+		for task in tasks:
+			var tp: Vector3 = cluster[task[0]][0]
+			var out := (tp.normalized() + Vector3.DOWN * 0.6).normalized()
+			for sub in ((task[1] as Dictionary).get("subtasks", []) as Array).slice(0, 6):
+				if str(sub).strip_edges() != "":
+					var p := _fan_spot(tp, out, placed, rng)
+					placed.append(p)
+					cluster.append([p, str(sub).strip_edges(), color, task[0]])
+		# Set this group to the right of the previous one.
+		var lo := INF
+		var hi := -INF
+		for p in placed:
+			lo = minf(lo, p.x)
+			hi = maxf(hi, p.x)
+		var base := items.size()
+		for c in cluster:
+			items.append([c[0] + Vector3(x - lo, 0, 0), c[1], c[2], c[3] + base if c[3] >= 0 else -1])
+		x += hi - lo + NoteScript.SIZE + BD_GROUP_GAP
+		gi += 1
+	if items.is_empty():
+		return []
+	# Center the whole layout on the view.
+	var box := AABB(items[0][0], Vector3.ZERO)
+	for it in items:
+		box = box.expand(it[0])
+	for it in items:
+		it[0] -= box.get_center()
 
 	var flat := Basis(Vector3.UP, rig.yaw)
 	var cam_pos := camera.global_position
-	var dist := maxf(BD_MIN_DIST, maxf(width * 0.65, height * 1.2))
+	var dist := maxf(BD_MIN_DIST, maxf(box.size.x * 0.65, box.size.y * 1.2) + box.size.z * 0.5)
 	var center := cam_pos
 	for attempt in 40:
 		center = cam_pos - flat.z * dist
 		var clear := true
 		for it in items:
-			var p: Vector3 = center + flat.x * float(it[0]) + Vector3.UP * float(it[1])
+			var p: Vector3 = center + flat * (it[0] as Vector3)
 			for v in notes.values():
 				if (v as NoteScript).global_position.distance_to(p) < SPACING:
 					clear = false
@@ -2196,25 +2359,60 @@ func _build_breakdown(groups: Array) -> Array:
 
 	var made: Array[NoteScript] = []
 	var entries: Array = []
+	var spots: Array[Vector3] = []
 	for it in items:
-		if str(it[2]) == "":
+		if str(it[1]) == "":
 			made.append(null)
 			continue
-		var parent: int = it[4]
-		var target: Vector3 = center + flat.x * float(it[0]) + Vector3.UP * float(it[1])
-		# Blocks grow out of their group's title block (parents are still at their start).
+		var parent: int = it[3]
+		var target: Vector3 = center + flat * (it[0] as Vector3)
+		# Blocks grow out of their parent (which is still at its own start).
 		var start := made[parent].global_position if parent >= 0 and made[parent] else target
-		var n := _create_note(start, it[2], it[3])
+		var n := _create_note(start, it[1], it[2])
 		n.rotation = Vector3(0.0, rig.yaw, 0.0)
+		n.anchor = parent < 0  # group titles carry their stack
 		n.refresh()
 		_ease_note(n, target, n.quaternion, BD_EASE_TIME)
 		made.append(n)
+		spots.append(target)
 		entries.append({"type": "create", "id": n.id})
 		if parent >= 0 and made[parent]:
 			_toggle_link(made[parent], n)
-	if not entries.is_empty():
-		rig.frame(center, dist)
+	_frame_spots(spots)
 	return entries
+
+
+## Where a block hanging from a parent at `pp` goes: on a cone around `out`
+## (the direction away from the parent's own parent, or down), FAN_DISTS
+## away, in the spot with the most room to the `others`, nearer and straighter
+## spots winning ties. Never closer than FAN_CLEAR to anything.
+func _fan_spot(pp: Vector3, out: Vector3, others: Array[Vector3], rng: RandomNumberGenerator) -> Vector3:
+	var a := out.cross(Vector3.FORWARD if absf(out.dot(Vector3.FORWARD)) < 0.9 else Vector3.RIGHT).normalized()
+	var b := out.cross(a)
+	var phase := rng.randf() * TAU
+	var best := Vector3.ZERO
+	var best_score := -INF
+	for dist in FAN_DISTS:
+		for tilt in FAN_TILTS:
+			for k in FAN_STEPS:
+				var az := phase + k * TAU / FAN_STEPS
+				var p := pp + (out * cos(tilt) + (a * cos(az) + b * sin(az)) * sin(tilt)) * dist
+				var room := INF
+				for o in others:
+					room = minf(room, o.distance_to(p))
+				if room < FAN_CLEAR:
+					continue
+				var score := minf(room, FAN_ROOM) - dist * 0.3 - tilt * 0.5
+				if score > best_score:
+					best_score = score
+					best = p
+	if best_score == -INF:
+		best = pp + out * FAN_DISTS[-1] * 1.5  # crowded: just go farther out
+	var jittered := best + Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), rng.randf_range(-1, 1)) * FAN_JITTER
+	for o in others:
+		if o.distance_to(jittered) < FAN_CLEAR:
+			return best
+	return jittered
 
 
 ## Add with AI: applies Claude's changes as one undo step. Ids that don't
@@ -2263,6 +2461,8 @@ func _apply_ai_edit(r: Dictionary) -> String:
 	# new group in free space in front of the camera.
 	var new_notes: Array[NoteScript] = []
 	var grow_from := {}  # new block -> where it eases in from
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
 	for item in _ai_list(r, "add"):
 		var t := str(item.get("text", "")).strip_edges()
 		var temp := str(item.get("temp_id", "")).strip_edges()
@@ -2271,9 +2471,10 @@ func _apply_ai_edit(r: Dictionary) -> String:
 		var parent: NoteScript = by_id.get(str(item.get("parent", "")))
 		var ci := int(item.get("color", -1))
 		var color := palette[ci] if ci >= 0 and ci < palette.size() else (parent.color if parent else last_color)
-		var pos := _ai_child_spot(parent) if parent else _ai_cluster_spot()
+		var pos := _ai_child_spot(parent, rng) if parent else _ai_cluster_spot()
 		var n := _create_note(pos, t, color)
 		n.quaternion = parent.quaternion if parent else Quaternion(Vector3.UP, rig.yaw)
+		n.anchor = parent == null  # a new group's title carries its stack
 		n.refresh()
 		if parent:
 			_toggle_link(parent, n)
@@ -2360,47 +2561,26 @@ func _spot_free(p: Vector3) -> bool:
 	return true
 
 
-## Where a new block under `parent` goes: continuing the column or row its
-## existing lower children form (subtasks stack down, tasks sit side by side),
-## or right below it if it has none; failing that, the nearest free spot
-## against one of its sides.
-func _ai_child_spot(parent: NoteScript) -> Vector3:
+## Where a new block under `parent` goes: fanned out around it like the
+## breakdown layout, away from the block it hangs from (its highest linked
+## neighbor above it), or downward if there's none, and clear of every block.
+func _ai_child_spot(parent: NoteScript, rng: RandomNumberGenerator) -> Vector3:
 	var pp := parent.global_position
-	var right := parent.global_transform.basis.x
-	right.y = 0.0
-	right = right.normalized() if right.length() > 0.01 else Basis(Vector3.UP, rig.yaw).x
-	var fwd := right.cross(Vector3.UP)
-	var kids: Array[Vector3] = []
+	var up_neighbor: NoteScript = null
 	for l in links:
 		if l[0] == parent.id or l[1] == parent.id:
 			var other: NoteScript = notes.get(l[1] if l[0] == parent.id else l[0])
-			if other and other.global_position.y < pp.y - 1.0:
-				kids.append(other.global_position)
-	var tries: Array[Vector3] = []
-	if kids.is_empty():
-		tries.append(pp + Vector3.DOWN * PLUS_NEW_OFFSET)
-	else:
-		var column := true
-		var lowest := kids[0]
-		var rightmost := kids[0]
-		for k in kids:
-			column = column and absf((k - pp).dot(right)) < 0.5
-			if k.y < lowest.y:
-				lowest = k
-			if (k - pp).dot(right) > (rightmost - pp).dot(right):
-				rightmost = k
-		for i in range(1, 7):
-			if column:
-				tries.append(lowest + Vector3.DOWN * PLUS_NEW_OFFSET * i)
-			else:
-				tries.append(rightmost + right * BD_TASK_STEP * i)
-	for i in range(1, 7):
-		for d in [Vector3.DOWN, right, -right, Vector3.UP, fwd, -fwd]:
-			tries.append(pp + d * PLUS_NEW_OFFSET * i)
-	for p in tries:
-		if _spot_free(p):
-			return p
-	return _free_spot(null, pp)
+			if other and other.global_position.y > pp.y + 0.5 \
+					and (up_neighbor == null or other.global_position.y > up_neighbor.global_position.y):
+				up_neighbor = other
+	var out := Vector3.DOWN
+	if up_neighbor:
+		out = ((pp - up_neighbor.global_position).normalized() + Vector3.DOWN * 0.6).normalized()
+	var others: Array[Vector3] = []
+	for v in notes.values():
+		others.append((v as NoteScript).global_position)
+	var p := _fan_spot(pp, out, others, rng)
+	return p if _spot_free(p) else _free_spot(null, p)
 
 
 ## Where a new top-level group goes: in front of the camera, at least
@@ -2569,6 +2749,7 @@ func _load() -> bool:
 			Color(str(d.get("color", "ffe680"))),
 			int(d.get("id", -1)))
 		n.status = str(d.get("status", ""))
+		n.anchor = bool(d.get("anchor", false))
 		var q: Array = d.get("rot", [])
 		if q.size() == 4:
 			n.quaternion = Quaternion(float(q[0]), float(q[1]), float(q[2]), float(q[3])).normalized()

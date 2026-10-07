@@ -33,6 +33,7 @@ On macOS, use Cmd wherever this says Ctrl (Cmd+Z, Cmd+C, Cmd+Enter…); the in-a
 | Turn a cube 90° | Arrow keys (selected cube) |
 | Straighten a cube | Double-tap R (upright and lined up with the grid; position stays) |
 | Link / unlink two notes | Select one, Shift+click the other |
+| Anchor blocks | An anchor (thick dark frame) carries every block linked to it, directly or through other blocks, when you move it, so linked stacks move as one; Ctrl+Z puts them all back. Toggle Anchor in the editor. AI group titles start as anchors |
 | Recolor selected | 1–7 |
 | Focus camera on selected | F |
 | Delete selected | Delete / Backspace |
@@ -42,12 +43,12 @@ On macOS, use Cmd wherever this says Ctrl (Cmd+Z, Cmd+C, Cmd+Enter…); the in-a
 | Redo | Ctrl+Y or Ctrl+Shift+Z (cleared once you do something new) |
 | Orbit | Right-drag |
 | Pan | Middle-drag or Shift+right-drag |
-| Zoom | Scroll |
-| Fly | W A S D, Q / E for down / up, Shift = faster |
+| Zoom | Scroll while orbiting (right-drag); scrolling while just flying does nothing |
+| Fly | W A S D, Q / E for down / up, Shift = much faster |
 | Fly up / down | Space or E / Q |
 | Toggle floor guides | G |
-| Break down a task with AI | B, or Esc → Break down a task: describe a big task, and Claude lays it out as linked blocks in a new notespace (groups of tasks, each with its subtasks below it). If there are blocks already, it asks before erasing them. Ctrl+Enter generates; Ctrl+Z brings the old blocks back. Needs an Anthropic API key, see below |
-| Add or change blocks with AI | Shift+B, or Esc → Add with AI: say what to add or change, and Claude adds, rewrites, links / unlinks, marks, recolors or removes blocks in the current space. New blocks appear next to the block they belong under; changed ones pulse. Ctrl+Z undoes it all in one step |
+| Break down a task with AI | B, or Esc → Break down a task: describe a big task, and Claude lays it out as linked blocks in a new notespace (groups of tasks, each with its subtasks around it). If there are blocks already, it asks before erasing them. Ctrl+Enter generates; Ctrl+Z brings the old blocks back. Needs an Anthropic API key, see below |
+| Add or change blocks with AI | Shift+B, or Esc → Add with AI: say what to add or change, and Claude adds, rewrites, links / unlinks, marks, recolors or removes blocks in the current space. New blocks branch out from the block they belong under; changed ones pulse. Ctrl+Z undoes it all in one step |
 | Toggle help | H (hidden at start; a small "H to toggle help" note bottom left is always shown) |
 
 Closing the editor on an empty note deletes it.
@@ -68,7 +69,7 @@ startup (the old file is left alone).
 
 With no save at all, the app starts with four linked blocks explaining the basics.
 
-It's plain JSON: notes (id, text, color, position, status), links (pairs of ids),
+It's plain JSON: notes (id, text, color, position, rotation, status, anchor), links (pairs of ids),
 and the camera position.
 
 ## AI: break down a task, add with AI
@@ -78,10 +79,12 @@ return structured JSON that the app turns into blocks.
 
 **Break down a task** (B) starts a new notespace. Claude splits a big task
 into 2–6 groups of related work: each group has a title, its tasks and their
-subtasks. The group title sits on top, its tasks in a row below it, and each
-task's subtasks are stacked under that task. Links connect title → task →
-subtask, each group gets its own color, and groups are farther apart than the
-blocks inside them. If the space already has blocks, the panel asks before
+subtasks. Each group grows like a 3D mind map: its tasks spread out around and
+below the title block, in every direction including depth, and each task's
+subtasks fan out the same way around that task, away from the title. Blocks are
+about 5–8 apart, never closer than 3.4, with a little randomness so it doesn't
+look machine-made. Links connect title → task → subtask, each group gets its
+own color, and groups sit side by side with a gap between them. If the space already has blocks, the panel asks before
 erasing them. They're only erased once Claude's answer has arrived, and the
 whole swap is one undo step.
 
@@ -89,10 +92,9 @@ whole swap is one undo step.
 color, position) and link, along with what you ask for. Claude answers with
 changes: new blocks (each under a parent block, or as a new group), rewritten
 texts, done / failed marks, colors, new or removed links, and removed blocks.
-A new block goes next to its parent. It continues the column or row the
-parent's other children form (subtasks stack down, tasks sit side by side), or
-goes right below a parent with no children yet. A new group gets its own spot
-in front of you, clear of everything else. Ids that don't match a block are
+A new block branches out from its parent the same way, away from the block
+the parent hangs from, into the most open space nearby. A new group gets its
+own spot in front of you, clear of everything else. Ids that don't match a block are
 skipped. Everything is one undo step, and a message says what changed.
 
 Both need an Anthropic API key. If `ANTHROPIC_API_KEY` is set, that one is used.
@@ -134,6 +136,10 @@ A few design decisions worth knowing before you change things:
 - **Cubes** are a `BoxMesh` with a small shader that darkens the face edges
   so the shape reads clearly, lit by a directional light (with a little
   self-glow so colors stay bright). Selection is an inverted-hull outline.
+- **Anchors** carry their stack. When an anchor is grabbed, every block linked
+  to it (transitively, through any links) records its offset from the anchor and
+  is kept there each frame until the anchor lands. Snapping is decided by the
+  anchor alone, then the whole stack is shifted clear of outside blocks.
 - **All cubes are the same size; the text scales to fit a face.**
   `_fit_font_size()` binary-searches the largest font size at which the
   wrapped text fits (without splitting words), so one word is huge and a

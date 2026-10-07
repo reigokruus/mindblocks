@@ -8,6 +8,10 @@ const MAX_DISTANCE := 300.0
 const ORBIT_SPEED := 0.006
 const PAN_SPEED := 0.0016
 const LOOK_SPEED := 0.0025
+## Flying speed in units per second, normal and with Shift. Fixed, so it
+## doesn't change with the orbit distance (which framing a layout can make large).
+const FLY_SPEED := 18.0
+const FLY_FAST := 43.0
 
 var camera: Camera3D
 ## Where the view starts, and where reset() puts it back.
@@ -100,9 +104,7 @@ func _process(delta: float) -> void:
 		dir -= Vector3.UP
 	if dir == Vector3.ZERO:
 		return
-	var speed := maxf(distance, 4.0) * 0.8
-	if Input.is_key_pressed(KEY_SHIFT):
-		speed *= 3.0
+	var speed := FLY_FAST if Input.is_key_pressed(KEY_SHIFT) else FLY_SPEED
 	position += dir.normalized() * speed * delta
 
 

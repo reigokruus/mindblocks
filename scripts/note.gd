@@ -28,6 +28,7 @@ render_mode cull_back, fog_disabled;
 
 uniform vec4 color : source_color = vec4(1.0);
 uniform float half_size = 1.0;
+uniform float anchor = 0.0;  // 1 draws the anchor frame
 
 varying vec3 lpos;
 varying vec3 lnorm;
@@ -51,6 +52,8 @@ void fragment() {
 	}
 	// Slightly darker edges make the cube's shape easy to read.
 	float shade = 1.0 - 0.28 * (1.0 - smoothstep(0.0, 0.07, e));
+	// Anchors get a thick dark frame around every face.
+	shade *= 1.0 - anchor * 0.55 * (1.0 - smoothstep(0.15, 0.17, e));
 	ALBEDO = color.rgb * shade;
 	ROUGHNESS = 0.85;
 	SPECULAR = 0.2;
@@ -108,6 +111,8 @@ var id: int = 0
 var text: String = ""
 var color: Color = Color("ffe680")
 var status: String = ""  # "", "done" or "failed"
+## An anchor carries every block linked to it (directly or through others) when moved.
+var anchor := false
 
 var _cube_mat: ShaderMaterial
 var _outline: MeshInstance3D
@@ -184,7 +189,7 @@ func _make_label() -> Label3D:
 	return l
 
 
-## Call after changing `text`, `color` or `status`.
+## Call after changing `text`, `color`, `status` or `anchor`.
 func refresh() -> void:
 	if _labels.is_empty():
 		return  # not in the tree yet; _ready() will call this
@@ -211,6 +216,7 @@ func _apply_depth_fx() -> void:
 	var alpha := FINISHED_ALPHA if finished else 1.0
 	var body := color.darkened(_dim)
 	_cube_mat.set_shader_parameter("color", Color(body, alpha))
+	_cube_mat.set_shader_parameter("anchor", 1.0 if anchor else 0.0)
 	var shader := _cube_shader_clear if finished else _cube_shader
 	if _cube_mat.shader != shader:
 		_cube_mat.shader = shader
@@ -264,6 +270,7 @@ func to_dict() -> Dictionary:
 		"pos": [p.x, p.y, p.z],
 		"rot": [q.x, q.y, q.z, q.w],
 		"status": status,
+		"anchor": anchor,
 	}
 
 
