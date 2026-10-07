@@ -21,7 +21,7 @@ On macOS, use Cmd wherever this says Ctrl (Cmd+Z, Cmd+C, Cmd+Enter…); the in-a
 | Read a block | Its text shows on the face turned toward you, always upright, and moves to another face as you fly around |
 | Pause / free the cursor | Esc; Continue or Esc again to resume. The pause menu has ▶️ Continue, 🆕 New notespace, 🧩 Break down a task, ✨ Add with AI, 🧭 Arrange notes around me and 🚪 Exit |
 | Quit | Esc → Exit (saves first) |
-| Start over | Esc → New notespace → Delete and start new: clears all blocks and links and brings back the first-run blocks and starting view (Ctrl+Z brings the old notespace back) |
+| Start over | Esc → New notespace → Delete and start new: clears all blocks and links and brings back the first-run overview stacks and starting view (Ctrl+Z brings the old notespace back) |
 | New note | Double-click empty space |
 | New linked cube next to another | Click a cube, then click the + off one of its faces (it lands directly beside that face; faces with a cube already against them have no +) |
 | Edit note | Double-click it, or select + Enter |
@@ -69,9 +69,13 @@ Windows: %APPDATA%\Godot\app_userdata\Mindblocks\notes.json
 
 The app used to be called Spatial Notes. If there's no Mindblocks save yet but
 there is one in the old `Spatial Notes` folder next to it, it's copied over on
-startup (the old file is left alone).
+startup (the old file is left alone). That's only tried once: a
+`migrated_from_spatial_notes` marker file next to the save remembers it, so a
+notespace you remove later doesn't come back from the old folder.
 
-With no save at all, the app starts with four linked blocks explaining the basics.
+With no save at all (and after Esc → New notespace), the app starts with an
+overview: four anchored stacks around you (Welcome to Mindblocks, Blocks,
+Organise, AI with Claude) whose blocks explain the main features and keys.
 
 It's plain JSON: notes (id, text, color, position, rotation, status, anchor), links (pairs of ids),
 and the camera position.
@@ -168,6 +172,11 @@ A few design decisions worth knowing before you change things:
   `_fit_font_size()` binary-searches the largest font size at which the
   wrapped text fits (without splitting words), so one word is huge and a
   paragraph is small.
+- **Starry sky.** The background is a small sky shader (`SKY_SHADER`): the
+  old dark background color with a sparse sprinkle of dim stars (`SKY_STAR_AMOUNT`, `SKY_STAR_BRIGHTNESS`) hashed onto a 3D grid of directions,
+  so they're spread evenly over the whole sphere with no texture files, and
+  they stay put as you look around. Lighting doesn't come from the sky, so
+  blocks look the same as before.
 - **Depth guides.** A faint floor grid, plus a drop line and a colored ring
   on the floor under every note, show each note's height and floor position
   at a glance (G toggles them). Links are camera-facing ribbons with a fixed

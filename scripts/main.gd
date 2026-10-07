@@ -10,8 +10,47 @@ const CameraRigScript := preload("res://scripts/camera_rig.gd")
 const SAVE_PATH := "user://notes.json"
 ## The app used to be called Spatial Notes; its save sits in that name's user:// folder.
 const OLD_APP_NAME := "Spatial Notes"
+const MIGRATED_PATH := "user://migrated_from_spatial_notes"
 const AUTOSAVE_DELAY := 1.0
 const BG_COLOR := Color(0.08, 0.09, 0.11)
+## The sky: BG_COLOR with a sparse sprinkle of dim stars, scattered evenly in
+## every direction. Two layers (small faint ones, fewer bigger ones); each grid cell
+## of a layer holds at most one star, so they never clump.
+## How many stars and how bright, for tweaking (1 and 0.35 are the defaults).
+const SKY_STAR_AMOUNT := 1.0
+const SKY_STAR_BRIGHTNESS := 0.35
+const SKY_SHADER := """
+shader_type sky;
+
+uniform vec3 base_color : source_color;
+uniform float star_amount = 1.0;  // scales how many cells hold a star
+uniform float star_brightness = 0.35;
+
+float hash(vec3 p) {
+	p = fract(p * vec3(443.897, 441.423, 437.195));
+	p += dot(p, p.yzx + 19.19);
+	return fract((p.x + p.y) * p.z);
+}
+
+// density: cells across the sky; size: star radius in cells; chance: share of cells with a star.
+float stars(vec3 dir, float density, float size, float chance) {
+	vec3 cell = floor(dir * density);
+	if (hash(cell + 7.13) > chance) {
+		return 0.0;
+	}
+	vec3 star = cell + 0.25 + 0.5 * vec3(hash(cell), hash(cell + 1.7), hash(cell + 3.1));
+	float d = length(normalize(star) - dir) * density;
+	return (1.0 - smoothstep(size * 0.4, size, d)) * (0.35 + 0.65 * hash(cell + 5.3));
+}
+
+void sky() {
+	vec3 dir = normalize(EYEDIR);
+	float s = (stars(dir, 110.0, 0.11, 0.07 * star_amount) * 0.6
+			+ stars(dir, 45.0, 0.07, 0.06 * star_amount)) * star_brightness;
+	vec3 tint = mix(vec3(0.75, 0.85, 1.0), vec3(1.0, 0.92, 0.8), hash(floor(dir * 45.0) + 9.9));
+	COLOR = base_color + tint * s;
+}
+"""
 ## Depth guides: a floor grid, with a drop line and a footprint ring under every note.
 const FLOOR_Y := -4.0
 const GRID_STEP := 4.0
@@ -188,6 +227,36 @@ const ARRANGE_FILL := 0.7
 const ARRANGE_GAP := 4.0
 const ARRANGE_LONG := 1.3
 
+## The first-run blocks: [title, [[block, [blocks under it]], ...]] per stack.
+## "Ctrl" reads "Cmd" on macOS.
+const WELCOME := [
+	["Welcome to Mindblocks", [
+		["Move the mouse to look around", []],
+		["Fly with W A S D", ["Space or E: up, Q: down", "Hold Shift to fly much faster"]],
+		["Esc: menu and a free mouse", ["The menu can start a new notespace"]],
+		["H shows all the controls", []],
+	]],
+	["Blocks", [
+		["Double-click empty space for a new block", ["Double-click a block to write on it"]],
+		["Hold click on a block to carry it", ["Drag its colored arrows to slide it", "R + mouse or arrow keys turn it", "R R straightens it"]],
+		["Click a block, then a + for a linked block", []],
+		["1–7 colors it, Delete removes it", ["Mark it done or failed in the editor"]],
+		["Ctrl+Z undo, Ctrl+Y redo", ["Ctrl+C / X / V: copy, cut, paste", "Alt + drag pulls out a copy"]],
+	]],
+	["Organise", [
+		["Shift+click links two blocks", ["Linked blocks form a stack"]],
+		["Drop a block near another to snap it", []],
+		["Anchors have a thick dark frame", ["Moving an anchor moves its stack", "Turning it swings the stack round", "Toggle Anchor in the editor"]],
+		["O arranges all stacks around you", []],
+	]],
+	["AI with Claude", [
+		["B breaks a big task into blocks", ["It starts a new notespace"]],
+		["Shift+B adds, changes or moves blocks", ["Try: organise this for me"]],
+		["Needs an Anthropic API key", ["Paste it once when asked"]],
+		["Ctrl+Z undoes any AI change", []],
+	]],
+]
+
 const HELP_TEXT := """Mouse — look around · clicks act at the crosshair
 Esc — pause and free the cursor · the pause menu has New notespace, Break down a task, Add with AI and Exit
 Double-click empty space — new note · click a cube, then + on a face — new linked cube there
@@ -353,8 +422,18 @@ func _ready() -> void:
 
 func _setup_environment() -> void:
 	var env := Environment.new()
-	env.background_mode = Environment.BG_COLOR
-	env.background_color = BG_COLOR
+	var sky_mat := ShaderMaterial.new()
+	sky_mat.shader = Shader.new()
+	sky_mat.shader.code = SKY_SHADER
+	sky_mat.set_shader_parameter("base_color", BG_COLOR)
+	sky_mat.set_shader_parameter("star_amount", SKY_STAR_AMOUNT)
+	sky_mat.set_shader_parameter("star_brightness", SKY_STAR_BRIGHTNESS)
+	var sky := Sky.new()
+	sky.sky_material = sky_mat
+	sky.radiance_size = Sky.RADIANCE_SIZE_32  # the sky lights nothing, so keep its lighting cheap
+	env.background_mode = Environment.BG_SKY
+	env.sky = sky
+	env.reflected_light_source = Environment.REFLECTION_SOURCE_DISABLED
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color(1, 1, 1)
 	env.ambient_light_energy = 0.45
@@ -2109,19 +2188,28 @@ func _set_note_color(n: NoteScript, c: Color) -> void:
 	_mark_dirty()
 
 
-## First launch: a row of linked blocks, read left to right, low enough to clear the help panel.
-## They sit exactly as far apart as snapping places cubes, so touching one doesn't make it jump.
+## First launch (and New notespace): an overview of the app as four stacks,
+## each an anchor title with its blocks fanned out below it (the same layout
+## as an AI breakdown, so it looks the same every time), arranged round the
+## starting view like Arrange notes around me, the first straight ahead.
 func _create_welcome_notes() -> void:
-	var x := -1.5 * PLUS_NEW_OFFSET
-	var a := _create_note(Vector3(x, -2.4, 0),
-		"Welcome to Mindblocks!\n\nEvery block is a note. Move the mouse to look around.", palette[0])
-	var b := _create_note(Vector3(x + PLUS_NEW_OFFSET, -2.4, 0),
-		"Double-click empty space to make a block.\n\nDouble-click a block to write on it.", palette[2])
-	var c := _create_note(Vector3(x + 2 * PLUS_NEW_OFFSET, -2.4, 0),
-		"Click a block to select it. Click a + to add a linked block, or drag an arrow to move it.", palette[3])
-	var d := _create_note(Vector3(x + 3 * PLUS_NEW_OFFSET, -2.4, 0),
-		"Esc frees the mouse.\n\nH shows all the controls.", palette[5])
-	links = [[a.id, b.id], [b.id, c.id], [c.id, d.id]]
+	rig.reset()
+	var groups: Array = []
+	for g in WELCOME:
+		var tasks: Array = []
+		for t in g[1]:
+			var subs: Array = []
+			for sub in t[1]:
+				subs.append(_shortcut_text(sub))
+			tasks.append({"text": _shortcut_text(t[0]), "subtasks": subs})
+		groups.append({"title": g[0], "tasks": tasks})
+	_build_breakdown(groups, false)
+	_finish_easing()
+	var targets: Dictionary = _arrange_targets()["targets"]
+	for n in targets:
+		n.global_position = targets[n][0]
+		n.quaternion = targets[n][1]
+	_select(null)
 
 
 ## Pause menu: swaps the Continue / New notespace buttons for the "are you sure?" step.
@@ -2165,6 +2253,28 @@ func _arrange_around_me() -> void:
 	if notes.is_empty():
 		_toast("Nothing to arrange")
 		return
+	var plan := _arrange_targets()
+	var targets: Dictionary = plan["targets"]
+	var count: int = plan["count"]
+	var entries: Array = []
+	for m in targets:
+		# Tiny differences (left over from arranging before) don't count as a move.
+		if (targets[m][0] as Vector3).distance_to(m.global_position) > 0.01 \
+				or (targets[m][1] as Quaternion).angle_to(m.quaternion) > 0.01:
+			entries.append(_move_record(m))
+			_ease_note(m, targets[m][0], targets[m][1], AI_MOVE_TIME, Tween.TRANS_BACK)
+	if entries.is_empty():
+		_toast("Already arranged")
+		return
+	_push_undo({"type": "group", "entries": entries, "label": "arrange around me"})
+	_select(null)
+	_toast(_shortcut_text("Arranged %d %s around you · Ctrl+Z undoes it"
+		% [count, "stack" if count == 1 else "stacks"]))
+
+
+## Where Arrange notes around me puts every block: {targets: {block: [place,
+## rotation]}, count: number of stacks}. See _arrange_around_me().
+func _arrange_targets() -> Dictionary:
 	var eye := camera.global_position
 	var flat := Basis(Vector3.UP, rig.yaw)
 	var fwd := -flat.z
@@ -2236,7 +2346,6 @@ func _arrange_around_me() -> void:
 		if count > 1:
 			var next: Dictionary = stacks[(k + 1) % count]
 			radius = maxf(radius, (st["reach"] + next["reach"] + ARRANGE_GAP) / (2.0 * sin(step * 0.5)))
-	var entries: Array = []
 	var targets := {}  # block -> [place, rotation]
 	for k in count:
 		var st: Dictionary = stacks[k]
@@ -2253,19 +2362,7 @@ func _arrange_around_me() -> void:
 		var q := Quaternion(Vector3.UP, turn)
 		for m in st["group"]:
 			targets[m] = [place + q * (m.global_position - st["center"]), (q * m.quaternion).normalized()]
-	for m in targets:
-		# Tiny differences (left over from arranging before) don't count as a move.
-		if (targets[m][0] as Vector3).distance_to(m.global_position) > 0.01 \
-				or (targets[m][1] as Quaternion).angle_to(m.quaternion) > 0.01:
-			entries.append(_move_record(m))
-			_ease_note(m, targets[m][0], targets[m][1], AI_MOVE_TIME, Tween.TRANS_BACK)
-	if entries.is_empty():
-		_toast("Already arranged")
-		return
-	_push_undo({"type": "group", "entries": entries, "label": "arrange around me"})
-	_select(null)
-	_toast(_shortcut_text("Arranged %d %s around you · Ctrl+Z undoes it"
-		% [count, "stack" if count == 1 else "stacks"]))
+	return {"targets": targets, "count": count}
 
 
 ## Removes every block and link, and returns the undo entries that bring them back.
@@ -2301,7 +2398,6 @@ func _new_notespace() -> void:
 		entries.append({"type": "create", "id": n.id})
 	undo_stack.clear()
 	_push_undo({"type": "group", "entries": entries, "label": "new notespace"})
-	rig.reset()
 	_save()
 	_set_paused(false)
 
@@ -2697,7 +2793,7 @@ func _apply_ai_message(data: Dictionary) -> String:
 ## it's clear of existing cubes, and turns the view level onto it. Each group
 ## is grown as a fan (see FAN_DISTS) around its title block, then the groups
 ## are set side by side. Returns the undo entries for the blocks it made.
-func _build_breakdown(groups: Array) -> Array:
+func _build_breakdown(groups: Array, frame: bool = true) -> Array:
 	# Each item: [local position, text, color, parent index]; local x is to the
 	# right of the view, y up, z toward the camera.
 	var items: Array = []
@@ -2788,7 +2884,8 @@ func _build_breakdown(groups: Array) -> Array:
 		entries.append({"type": "create", "id": n.id})
 		if parent >= 0 and made[parent]:
 			_toggle_link(made[parent], n)
-	_frame_spots(spots)
+	if frame:
+		_frame_spots(spots)
 	return entries
 
 
@@ -3289,8 +3386,16 @@ func _save() -> void:
 	dirty = false
 
 
-## Copies the save from the old app name's folder, once, if there's none here yet.
+## Copies the save from the old app name's folder, once, if there's none here
+## yet. MIGRATED_PATH marks that this was tried, so a notespace removed later
+## doesn't come back from the old folder.
 func _migrate_old_save() -> void:
+	if FileAccess.file_exists(MIGRATED_PATH):
+		return
+	var marker := FileAccess.open(MIGRATED_PATH, FileAccess.WRITE)
+	if marker:
+		marker.store_string("Notes from Spatial Notes were checked for (and copied if there was no save yet).\n")
+		marker.close()
 	if FileAccess.file_exists(SAVE_PATH):
 		return
 	var old := OS.get_user_data_dir().get_base_dir().path_join(OLD_APP_NAME).path_join("notes.json")
