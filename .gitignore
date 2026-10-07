@@ -2,3 +2,6 @@
 .godot/
 *.tmp
 notes.json
+
+# Exported builds
+build/

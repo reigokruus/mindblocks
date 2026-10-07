@@ -57,6 +57,34 @@ On macOS, use Cmd wherever this says Ctrl (Cmd+Z, Cmd+C, Cmd+Enter…); the in-a
 
 Closing the editor on an empty note deletes it.
 
+## Export and share
+
+`export_presets.cfg` has two presets, each a single file with everything packed
+inside, written to `build/` (ignored by git):
+
+- **Windows Desktop** → `build/windows/Mindblocks.exe` (64-bit)
+- **Linux** → `build/linux/Mindblocks.x86_64` (64-bit)
+
+The app icon is `icon.svg` (also the window icon); the `.exe` gets it from
+`icon.ico` (16–256 px), which Godot embeds by itself.
+
+1. Once per Godot version: Editor → **Manage Export Templates** → **Download
+   and Install** (about 1 GB).
+2. Project → **Export…** → pick the preset → **Export Project**, or from a
+   terminal in this folder:
+   `godot --headless --path . --export-release "Windows Desktop" build/windows/Mindblocks.exe`
+   or `godot --headless --path . --export-release "Linux" build/linux/Mindblocks.x86_64`
+3. Share the file (zip it for sending).
+   - **Windows:** it's not code-signed, so SmartScreen may say "Windows
+     protected your PC": click **More info** → **Run anyway**.
+   - **Linux:** make it executable once (`chmod +x Mindblocks.x86_64`), then
+     double-click it or run `./Mindblocks.x86_64`.
+
+Notes and the API key live in each user's own app data folder (see below),
+never in the build, so don't worry about shipping yours. Anyone who wants the
+AI features pastes their own Anthropic API key the first time they press B or
+Shift+B; everything else works without one.
+
 ## Where your notes live
 
 Everything autosaves to `user://notes.json`. That's:
