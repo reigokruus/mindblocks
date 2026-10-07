@@ -36,7 +36,7 @@ On macOS, use Cmd wherever this says Ctrl (Cmd+Z, Cmd+C, Cmd+Enter…); the in-a
 | Turn a cube 90° | Arrow keys (selected cube) |
 | Straighten a cube | Double-tap R (upright and lined up with the grid; position stays) |
 | Link / unlink two notes | Select one, Shift+click the other (a click sounds; a lower one for unlinking) |
-| Anchor blocks | An anchor (thick dark frame) carries every block linked to it, directly or through other blocks, when you move it, so linked stacks move as one, wobbling a little on the way and settling exactly where you put them; Ctrl+Z puts them all back. Toggle Anchor in the editor. AI group titles start as anchors. An anchor only turns left / right (R + mouse, ← / →, R R to straighten), and its whole stack swings round with it, keeping its shape (one undo step) |
+| Anchor blocks | An anchor (thick dark frame) carries every block linked to it, directly or through other blocks, when you move it, so linked stacks move as one, wobbling a little on the way and settling exactly where you put them; Ctrl+Z puts them all back. Toggle Anchor in the editor. AI group titles start as anchors. An anchor only turns left / right (R + mouse, ← / →, R R to straighten), and its whole stack swings round after it on the same springs, settling in its exact shape (one undo step) |
 | Recolor selected | 1–7 |
 | Focus camera on selected | F |
 | Delete selected | Delete / Backspace |

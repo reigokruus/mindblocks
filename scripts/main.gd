@@ -43,6 +43,7 @@ const PLUS_RADIUS := 0.28
 ## and how long an arrow-key quarter turn takes.
 const ROTATE_SPEED := 0.01
 const TURN_TIME := 0.3
+const STACK_TURN_TIME := 0.6  # an anchor's stack swings round more slowly, so its wobble stays gentle
 const DOUBLE_TAP_TIME := 0.35  # seconds between two R presses that count as a double-tap
 ## Two quick clicks only make a double-click if they hit the same block, or both
 ## hit empty space with the aim turned less than this (radians) in between. With
@@ -1046,7 +1047,9 @@ func _rotate_note(n: NoteScript, relative: Vector2) -> void:
 		if n.anchor and follow.is_empty():
 			move_start["followers"] = _stack_records(n)
 	if n.anchor:
-		# Anchors only turn left / right, taking their stack with them.
+		# Anchors only turn left / right, taking their stack with them on springs.
+		if follow.is_empty() or follow["anchor"] != n:
+			_start_follow(n, false)
 		_turn_stack_by(n, Quaternion(Vector3.UP, relative.x * ROTATE_SPEED))
 		_mark_dirty()
 		return
@@ -1367,9 +1370,9 @@ func _stack_of(n: NoteScript) -> Dictionary:
 	return stack
 
 
-## If `n` is an anchor, the blocks linked to it start following it, and their
-## places go into move_start so the move undoes as one step.
-func _start_follow(n: NoteScript) -> void:
+## If `n` is an anchor, the blocks linked to it start following it, and (with
+## `record`) their places go into move_start so the move undoes as one step.
+func _start_follow(n: NoteScript, record: bool = true) -> void:
 	if not follow.is_empty():
 		_finish_easing()  # a stack still easing from its last move lands first
 	follow = {}
@@ -1386,7 +1389,8 @@ func _start_follow(n: NoteScript) -> void:
 		records.append(_move_record(m))
 		springs[m] = {"vel": Vector3.ZERO, "rot": m.quaternion, "hops": stack[m]}
 	follow = {"anchor": n, "offsets": offsets, "springs": springs}
-	move_start["followers"] = records
+	if record:
+		move_start["followers"] = records
 
 
 ## Moves the stack after its anchor. Each block is pulled toward its place
@@ -1402,7 +1406,8 @@ func _update_follow(force: bool = false) -> void:
 	if not is_instance_valid(a) or not notes.has(a.id):
 		follow = {}
 		return
-	var held := a == dragging or (gizmo_axis >= 0 and a == selected)
+	var held := a == dragging or (gizmo_axis >= 0 and a == selected) \
+			or (a == selected and Input.is_key_pressed(KEY_R))  # turning it with R + mouse
 	var tween: Tween = follow.get("tween")
 	var anchor_done := not held and (tween == null or not tween.is_running())
 	var dt := minf(get_process_delta_time(), 0.05) / FOLLOW_SUBSTEPS
@@ -1472,7 +1477,7 @@ func _turn_stack_by(n: NoteScript, q: Quaternion, members: Array = []) -> void:
 ## With `straighten`, the anchor itself ends at no rotation at all.
 func _ease_stack_turn(n: NoteScript, q: Quaternion, label: String, straighten: bool = false) -> void:
 	if turn_tween and turn_tween.is_running():
-		turn_tween.custom_step(TURN_TIME)  # land a turn still running first
+		turn_tween.custom_step(STACK_TURN_TIME)  # land a turn still running first
 	var members: Array = _stack_of(n).keys()
 	var entries: Array = [_move_record(n)]
 	for m in members:
@@ -1481,6 +1486,7 @@ func _ease_stack_turn(n: NoteScript, q: Quaternion, label: String, straighten: b
 	var done := [Quaternion.IDENTITY]  # how much of the turn is applied so far
 	var start_rot := n.quaternion
 	turn_note = n
+	_start_follow(n, false)  # the stack swings after the anchor on springs
 	turn_tween = n.create_tween()
 	turn_tween.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	turn_tween.tween_method(func(t: float):
@@ -1490,11 +1496,24 @@ func _ease_stack_turn(n: NoteScript, q: Quaternion, label: String, straighten: b
 		_turn_stack_by(n, (now * done[0].inverse()).normalized(), members)
 		done[0] = now
 		if straighten:
-			n.quaternion = start_rot.slerp(Quaternion.IDENTITY, t), 0.0, 1.0, TURN_TIME)
+			n.quaternion = start_rot.slerp(Quaternion.IDENTITY, t), 0.0, 1.0, STACK_TURN_TIME)
+	if not follow.is_empty():
+		follow["tween"] = turn_tween  # keep following until the turn is done
 	turn_tween.finished.connect(func():
 		if is_instance_valid(n) and notes.has(n.id):
-			_unoverlap_stack(n)
+			_settle_turned_stack(n)
 		_mark_dirty())
+
+
+## After a stack has turned: shifts it clear of outside blocks. If it's still
+## swinging on springs, the anchor eases clear and the stack follows.
+func _settle_turned_stack(n: NoteScript) -> void:
+	if follow.is_empty() or follow["anchor"] != n:
+		_unoverlap_stack(n)
+		return
+	var shift := _stack_clearance(n.global_position)
+	if shift.length() > 0.001:
+		follow["tween"] = _ease_note(n, n.global_position + shift, n.quaternion, SETTLE_TIME)
 
 
 ## If any block of `n`'s stack ended up too close to a block outside it,
@@ -1680,8 +1699,7 @@ func _commit_move() -> void:
 	elif n and not followers.is_empty() and not n.quaternion.is_equal_approx(move_start["rot"]):
 		# An anchor turned its stack (R + mouse).
 		_push_undo({"type": "group", "entries": [move_start] + followers, "label": "stack rotation"})
-		if follow.is_empty():
-			_unoverlap_stack(n)
+		_settle_turned_stack(n)
 	elif n and not n.global_position.is_equal_approx(move_start["pos"]):
 		move_start["label"] = "block move"
 		_push_undo(move_start)
@@ -1788,7 +1806,7 @@ func _ease_note(n: NoteScript, pos: Vector3, rot: Quaternion, time: float,
 ## redo starts from (and records) the right place.
 func _finish_easing() -> void:
 	if turn_tween and turn_tween.is_running():
-		turn_tween.custom_step(TURN_TIME)  # an eased turn (of a block or a stack) lands first
+		turn_tween.custom_step(STACK_TURN_TIME)  # an eased turn (of a block or a stack) lands first
 	for e in easing:
 		var tween: Tween = e["tween"]
 		if tween.is_running() and is_instance_valid(e["note"]):
