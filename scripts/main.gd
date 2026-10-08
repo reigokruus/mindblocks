@@ -651,7 +651,8 @@ func _build_ui() -> void:
 	layer.add_child(pause_panel)
 	# Clicking the dimmed area around the menu also continues.
 	pause_panel.gui_input.connect(_on_pause_backdrop_input)
-	pause_panel.theme = _emoji_theme()
+	if not OS.has_feature("web"):  # browsers have no emoji font; the web build's own font is used as is
+		pause_panel.theme = _emoji_theme()
 	var center := CenterContainer.new()
 	center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	pause_panel.add_child(center)

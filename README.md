@@ -104,9 +104,22 @@ so hosts don't need special headers). To put it on itch.io:
 
 In the browser, click Continue to grab the mouse; Esc (which the browser uses
 to free the mouse) brings the menu back. The menu has no emoji there (browsers
-give Godot no emoji font) and no Exit. Notes are saved in that browser. The AI
+give Godot no emoji font) and no Exit. Text uses the bundled Noto Sans with
+distance-field rendering, which stays crisp at any size in the browser. Notes are saved in that browser. The AI
 features need each visitor's own Anthropic API key, which also stays in their
 browser.
+
+### Deploying to itch.io
+
+Updates go up with itch's command-line tool [butler](https://itch.io/docs/butler/):
+
+1. Once: install butler and run `butler login` (it opens your browser to approve).
+2. Every update: `./deploy_web.sh`. It exports the Web build and runs
+   `butler push build/web rkr8/mindblocks:html5`, uploading only what changed,
+   with the git version as the build number.
+3. After the very first push: on the itch page, tick **This file will be played
+   in the browser** on the `html5` upload, and delete any zip uploaded by hand,
+   so there's just one browser upload.
 
 ## Where your notes live
 
@@ -185,6 +198,7 @@ main.tscn            one Node3D with main.gd; everything else is built in code
 scripts/main.gd      environment, input, picking, dragging, links, editor UI, AI breakdown, save/load
 scripts/note.gd      one note: a cube with its text on the face toward you, outline, done/failed marks
 scripts/camera_rig.gd orbit / pan / zoom / fly camera
+fonts/               Noto Sans (SIL Open Font License, see NotoSans-LICENSE.txt), the web build's UI font
 ```
 
 A few design decisions worth knowing before you change things:
