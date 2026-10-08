@@ -85,6 +85,24 @@ never in the build, so don't worry about shipping yours. Anyone who wants the
 AI features pastes their own Anthropic API key the first time they press B or
 Shift+B; everything else works without one.
 
+## Play in the browser (itch.io)
+
+There's also a **Web** export preset → `build/web/index.html` (single-threaded,
+so hosts don't need special headers). To put it on itch.io:
+
+1. Export it: `godot --headless --path . --export-release "Web" build/web/index.html`
+2. Zip the *contents* of `build/web` (so `index.html` is at the top of the zip).
+3. On itch.io: **Upload new project** → Kind of project **HTML** → upload the
+   zip and tick **This file will be played in the browser**.
+4. Embed options: viewport **1280 × 760**, enable **Fullscreen button**, leave
+   **SharedArrayBuffer support** and **Mobile friendly** off.
+
+In the browser, click Continue to grab the mouse; Esc (which the browser uses
+to free the mouse) brings the menu back. The menu has no emoji there (browsers
+give Godot no emoji font) and no Exit. Notes are saved in that browser. The AI
+features need each visitor's own Anthropic API key, which also stays in their
+browser.
+
 ## Where your notes live
 
 Everything autosaves to `user://notes.json`. That's:

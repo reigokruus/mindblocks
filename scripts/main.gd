@@ -367,6 +367,9 @@ var pause_buttons: Control  # Continue / New notespace
 var new_confirm: Control  # "Start a new notespace?" with its two buttons
 var crosshair: Control
 var paused := false
+## Whether the mouse was captured last frame. In a browser, Esc releases the
+## pointer lock without the app seeing the key, so losing it opens the menu.
+var was_captured := false
 var ai_panel: PanelContainer
 var ai_prompt: TextEdit
 var ai_key_edit: LineEdit
@@ -417,7 +420,8 @@ func _ready() -> void:
 	# Open big: maximized, but still a normal window (title bar, taskbar).
 	# Skipped when the game runs embedded in the editor's Game tab.
 	if not Engine.is_embedded_in_editor():
-		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MAXIMIZED)
+		if not OS.has_feature("web"):  # in a browser the page decides the size
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MAXIMIZED)
 
 
 func _setup_environment() -> void:
@@ -691,6 +695,12 @@ func _build_ui() -> void:
 	# Labels start with an emoji: left-aligned, so the emoji line up in a column.
 	for b: Button in [continue_btn, new_btn, ai_btn, ai_edit_btn, arrange_btn, exit_btn]:
 		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	# In a browser: no system emoji font (they'd show as boxes), and quitting does nothing.
+	if OS.has_feature("web"):
+		for b: Button in [continue_btn, new_btn, ai_btn, ai_edit_btn, arrange_btn]:
+			b.text = b.text.get_slice("  ", 1)
+			b.alignment = HORIZONTAL_ALIGNMENT_CENTER
+		exit_btn.visible = false
 	buttons.add_child(continue_btn)
 	buttons.add_child(new_btn)
 	buttons.add_child(ai_btn)
@@ -719,6 +729,9 @@ func _build_ui() -> void:
 	cancel_btn.custom_minimum_size = Vector2(100, 40)
 	cancel_btn.pressed.connect(_show_new_confirm.bind(false))
 	confirm_row.add_child(cancel_btn)
+	if OS.has_feature("web"):
+		yes_btn.text = yes_btn.text.get_slice("  ", 1)
+		cancel_btn.text = cancel_btn.text.get_slice("  ", 1)
 	confirm.add_child(confirm_row)
 	new_confirm = confirm
 	menu_box.add_child(confirm)
@@ -764,7 +777,8 @@ func _build_ai_panel(layer: CanvasLayer) -> void:
 
 	ai_key_edit = LineEdit.new()
 	ai_key_edit.secret = true
-	ai_key_edit.placeholder_text = "Anthropic API key (sk-ant-…), kept on this computer"
+	ai_key_edit.placeholder_text = ("Anthropic API key (sk-ant-…). Your key stays in this browser."
+		if OS.has_feature("web") else "Anthropic API key (sk-ant-…), kept on this computer")
 	vbox.add_child(ai_key_edit)
 
 	ai_status = Label.new()
@@ -846,6 +860,11 @@ func _panel_style(bg: Color, radius: int) -> StyleBoxFlat:
 # --- Per frame --------------------------------------------------------------
 
 func _process(delta: float) -> void:
+	if OS.has_feature("web"):
+		var captured := _mouse_captured()
+		if was_captured and not captured and not paused and not _panel_open():
+			_set_paused(true)
+		was_captured = captured
 	_keep_camera_outside_notes()
 	_update_depth_fx(delta)
 
@@ -2643,6 +2662,9 @@ func _ai_generate(confirmed: bool = false) -> void:
 		"anthropic-version: 2023-06-01",
 		"anthropic-beta: server-side-fallback-2026-07-01",
 	]
+	if OS.has_feature("web"):
+		# The API only answers a browser that says it means to call it directly (CORS).
+		headers.append("anthropic-dangerous-direct-browser-access: true")
 	var err := ai_http.request(AI_URL, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
 	if err != OK:
 		ai_status.text = "Couldn't start the request: %s" % error_string(err)
