@@ -5,6 +5,9 @@ through big ideas spatially: fly around your notes, link them into stacks that
 move as one, and let Claude break a big task down into blocks or reorganise
 the space for you.
 
+▶ **[Play Mindblocks in your browser on itch.io](https://rkr8.itch.io/mindblocks)**:
+no download needed. The AI features need your own Anthropic API key.
+
 ## Open it
 
 1. Install Godot 4.4 or newer (the standard build, not .NET).
@@ -86,6 +89,8 @@ AI features pastes their own Anthropic API key the first time they press B or
 Shift+B; everything else works without one.
 
 ## Play in the browser (itch.io)
+
+The live version is at [rkr8.itch.io/mindblocks](https://rkr8.itch.io/mindblocks).
 
 There's also a **Web** export preset → `build/web/index.html` (single-threaded,
 so hosts don't need special headers). To put it on itch.io:
