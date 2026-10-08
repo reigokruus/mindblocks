@@ -133,9 +133,22 @@ var _face_vis: Array[float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # text opacity per
 var _face_up: Array[Vector3] = []  # text "up" per face, in the cube's space
 var _ink := Color.BLACK
 var _alpha := 1.0
+## Squash: pressed against a wall or furniture, the cube flattens along the
+## push direction (keeping its volume), and springs back when let go. Only the
+## look changes: _body is scaled, the note itself (and so picking and saving) isn't.
+const SQUASH_MAX := 0.35  # flattened by at most this much
+const SQUASH_STIFFNESS := 260.0
+const SQUASH_DAMPING := 13.0  # low enough that it overshoots a little on the way back
+var _body: Node3D  # holds everything visible
+var _squash := 0.0
+var _squash_vel := 0.0
+var _squash_target := 0.0
+var _squash_dir := Vector3.UP  # world direction it's flattened along
 
 
 func _ready() -> void:
+	_body = Node3D.new()
+	add_child(_body)
 	if _cube_shader == null:
 		_cube_shader = Shader.new()
 		_cube_shader.code = CUBE_SHADER
@@ -151,7 +164,7 @@ func _ready() -> void:
 	var cube := MeshInstance3D.new()
 	cube.mesh = box
 	cube.material_override = _cube_mat
-	add_child(cube)
+	_body.add_child(cube)
 
 	# Selection outline: a slightly bigger box showing only its inside faces.
 	var outline_mat := StandardMaterial3D.new()
@@ -164,7 +177,7 @@ func _ready() -> void:
 	_outline.mesh = outline_box
 	_outline.material_override = outline_mat
 	_outline.visible = false
-	add_child(_outline)
+	_body.add_child(_outline)
 
 	_mark_mat = ShaderMaterial.new()
 	_mark_mat.shader = _mark_shader
@@ -179,14 +192,14 @@ func _ready() -> void:
 		l.visible = false
 		_labels.append(l)
 		_face_up.append(f[1])
-		add_child(l)
+		_body.add_child(l)
 		var m := MeshInstance3D.new()
 		m.mesh = quad
 		m.material_override = _mark_mat
 		m.transform = Transform3D(face_basis, normal * (SIZE * 0.5 + 0.01))
 		m.visible = false
 		_marks.append(m)
-		add_child(m)
+		_body.add_child(m)
 
 	refresh()
 
@@ -249,9 +262,42 @@ func _apply_depth_fx() -> void:
 		_mark_mat.set_shader_parameter("shape", 1 if status == "done" else 2)
 
 
+## Flattens the cube by `amount` (0 = not at all, 1 = as much as it goes)
+## along world direction `dir`; it springs toward that. Call with 0 to let it
+## spring back.
+func set_squash(dir: Vector3, amount: float) -> void:
+	_squash_target = clampf(amount, 0.0, 1.0) * SQUASH_MAX
+	if amount > 0.0 and dir.length() > 0.01:
+		_squash_dir = dir.normalized()
+
+
+func _update_squash(delta: float) -> void:
+	if _squash_target == 0.0 and absf(_squash) < 0.001 and absf(_squash_vel) < 0.001:
+		if _squash != 0.0:
+			_squash = 0.0
+			_squash_vel = 0.0
+			_body.transform = Transform3D.IDENTITY
+		return
+	var dt := minf(delta, 0.05)
+	_squash_vel += ((_squash_target - _squash) * SQUASH_STIFFNESS - _squash_vel * SQUASH_DAMPING) * dt
+	_squash += _squash_vel * dt
+	# Scale (1 - squash) along the push direction and a bit up across it, so the
+	# volume stays about the same. Worked out in the cube's own space.
+	var k := 1.0 - _squash
+	var side := 1.0 / sqrt(maxf(k, 0.1))
+	var n := (global_transform.basis.orthonormalized().inverse() * _squash_dir).normalized()
+	var b := Basis.from_scale(Vector3.ONE * side)
+	var along := k - side
+	b.x += n * (n.x * along)
+	b.y += n * (n.y * along)
+	b.z += n * (n.z * along)
+	_body.basis = b
+
+
 ## Picks the face turned most toward the camera for the text, fades faces in
 ## and out, and clicks the text on the shown face(s) round to read upright.
 func _process(delta: float) -> void:
+	_update_squash(delta)
 	var cam := get_viewport().get_camera_3d()
 	if cam == null or _labels.is_empty():
 		return

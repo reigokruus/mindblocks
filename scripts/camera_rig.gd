@@ -10,8 +10,12 @@ const PAN_SPEED := 0.0016
 const LOOK_SPEED := 0.0025
 ## Flying speed in units per second, normal and with Shift. Fixed, so it
 ## doesn't change with the orbit distance (which framing a layout can make large).
+## Holding a direction speeds up over FLY_RAMP seconds to FLY_BOOST times
+## that, so crossing the big room takes a few seconds; letting go resets it.
 const FLY_SPEED := 18.0
-const FLY_FAST := 43.0
+const FLY_FAST := 60.0
+const FLY_BOOST := 2.5
+const FLY_RAMP := 1.5
 
 var camera: Camera3D
 ## Where the view starts, and where reset() puts it back.
@@ -24,11 +28,15 @@ var pitch := START_PITCH
 var distance := START_DISTANCE
 ## Set by main while a text field has focus, so typing doesn't fly the camera.
 var input_blocked := false
+var _fly_time := 0.0  # how long the current flight has gone on
 
 
 func _init() -> void:
 	camera = Camera3D.new()
 	camera.far = 1000.0
+	# A near plane further out than the default 0.05 gives the depth buffer much
+	# more precision across the big room, so touching surfaces don't flicker.
+	camera.near = 0.2
 	add_child(camera)
 
 
@@ -84,6 +92,7 @@ func frame(target: Vector3, dist: float) -> void:
 
 func _process(delta: float) -> void:
 	if input_blocked:
+		_fly_time = 0.0
 		return
 	# Ctrl / Cmd is for shortcuts (Ctrl+S, Ctrl+Z), so it never flies the camera.
 	if Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META):
@@ -103,8 +112,11 @@ func _process(delta: float) -> void:
 	if Input.is_key_pressed(KEY_Q):
 		dir -= Vector3.UP
 	if dir == Vector3.ZERO:
+		_fly_time = 0.0
 		return
-	var speed := FLY_FAST if Input.is_key_pressed(KEY_SHIFT) else FLY_SPEED
+	_fly_time += delta
+	var boost := lerpf(1.0, FLY_BOOST, clampf(_fly_time / FLY_RAMP, 0.0, 1.0))
+	var speed := (FLY_FAST if Input.is_key_pressed(KEY_SHIFT) else FLY_SPEED) * boost
 	position += dir.normalized() * speed * delta
 
 

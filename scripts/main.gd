@@ -6,6 +6,7 @@ extends Node3D
 
 const NoteScript := preload("res://scripts/note.gd")
 const CameraRigScript := preload("res://scripts/camera_rig.gd")
+const RoomScript := preload("res://scripts/room.gd")
 
 const SAVE_PATH := "user://notes.json"
 ## The app used to be called Spatial Notes; its save sits in that name's user:// folder.
@@ -13,7 +14,7 @@ const OLD_APP_NAME := "Spatial Notes"
 const MIGRATED_PATH := "user://migrated_from_spatial_notes"
 const AUTOSAVE_DELAY := 1.0
 const BG_COLOR := Color(0.08, 0.09, 0.11)
-## The sky: BG_COLOR with a sparse sprinkle of dim stars, scattered evenly in
+## The sky, seen through the room's window: BG_COLOR with a sparse sprinkle of dim stars, scattered evenly in
 ## every direction. Two layers (small faint ones, fewer bigger ones); each grid cell
 ## of a layer holds at most one star, so they never clump.
 ## How many stars and how bright, for tweaking (1 and 0.35 are the defaults).
@@ -52,7 +53,18 @@ void sky() {
 }
 """
 ## Depth guides: a floor grid, with a drop line and a footprint ring under every note.
-const FLOOR_Y := -4.0
+const FLOOR_Y := RoomScript.OFFSET.y + RoomScript.FLOOR * RoomScript.SCALE + 0.05  # the room's floor
+## The camera is kept at least this far inside the room's walls, floor and ceiling.
+const ROOM_MARGIN := 1.5
+## Notes are kept this far (their half size) out of walls and furniture. Pushed
+## in more than SQUASH_START, a note starts to flatten, fully by SQUASH_FULL more.
+const NOTE_RADIUS := 1.0
+const SQUASH_START := 0.05
+const SQUASH_FULL := 2.5
+## Frame rate caps: normally, while paused, and while the window is in the background.
+const MAX_FPS := 60
+const PAUSED_FPS := 30
+const BACKGROUND_FPS := 10
 const GRID_STEP := 4.0
 const GRID_HALF := 80.0
 const FOOT_RADIUS := 0.35
@@ -70,7 +82,7 @@ const FOCUS_MARGIN := 0.75
 ## The camera is kept at least this far outside every cube.
 const CAMERA_RADIUS := 0.4
 const DIM_RANGE := 12.0
-const MAX_DIM := 0.6
+const MAX_DIM := 0.3  # gentle: in a bright room, strongly darkened blocks look muddy
 ## Cubes never end up closer than SPACING (center to center). A cube that's
 ## placed too close to others (dropped, created, pasted, copied) floats away
 ## to the nearest free spot over SETTLE_TIME; the cubes already there stay put.
@@ -363,6 +375,8 @@ var mark_done_btn: Button
 var mark_failed_btn: Button
 var anchor_btn: Button
 var pause_panel: Control
+## Web only: what Exit shows, since a page can't close its own tab.
+var exit_panel: Control
 var pause_buttons: Control  # Continue / New notespace
 var new_confirm: Control  # "Start a new notespace?" with its two buttons
 var crosshair: Control
@@ -370,6 +384,8 @@ var paused := false
 ## Whether the mouse was captured last frame. In a browser, Esc releases the
 ## pointer lock without the app seeing the key, so losing it opens the menu.
 var was_captured := false
+var pressing := {}  # notes pressed against a wall or furniture right now
+var _perf_on := false  # print frame rate and draw calls (see _debug_flag())
 var ai_panel: PanelContainer
 var ai_prompt: TextEdit
 var ai_key_edit: LineEdit
@@ -391,6 +407,11 @@ var ai_busy := false
 func _ready() -> void:
 	last_color = palette[0]
 	_setup_environment()
+	Engine.max_fps = MAX_FPS
+	_perf_on = _debug_flag("perf")
+	if _debug_flag("nomsaa"):
+		get_viewport().msaa_3d = Viewport.MSAA_DISABLED
+	add_child(RoomScript.new())
 	rig = CameraRigScript.new()
 	rig.process_priority = -1  # fly first, so _process() can then push the camera out of cubes
 	add_child(rig)
@@ -440,7 +461,12 @@ func _setup_environment() -> void:
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_DISABLED
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color(1, 1, 1)
-	env.ambient_light_energy = 0.45
+	env.ambient_light_energy = 0.55  # a bit more than the sun alone needs: it stands in for a ceiling light
+	# A faint warm haze, so the far side of the big room fades softly.
+	env.fog_enabled = true
+	env.fog_light_color = Color(0.93, 0.88, 0.8)
+	env.fog_density = 0.0015
+	env.fog_sky_affect = 0.0  # the stars outside the window stay clear
 	var world_env := WorldEnvironment.new()
 	world_env.environment = env
 	add_child(world_env)
@@ -507,6 +533,7 @@ func _build_guides() -> void:
 	grid = MeshInstance3D.new()
 	grid.mesh = im
 	grid.position.y = FLOOR_Y
+	grid.visible = false  # the room has a real floor now; drop lines and rings still land on it
 	add_child(grid)
 
 	guides_mesh = ImmediateMesh.new()
@@ -696,12 +723,11 @@ func _build_ui() -> void:
 	# Labels start with an emoji: left-aligned, so the emoji line up in a column.
 	for b: Button in [continue_btn, new_btn, ai_btn, ai_edit_btn, arrange_btn, exit_btn]:
 		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	# In a browser: no system emoji font (they'd show as boxes), and quitting does nothing.
+	# In a browser there's no system emoji font (they'd show as boxes).
 	if OS.has_feature("web"):
-		for b: Button in [continue_btn, new_btn, ai_btn, ai_edit_btn, arrange_btn]:
+		for b: Button in [continue_btn, new_btn, ai_btn, ai_edit_btn, arrange_btn, exit_btn]:
 			b.text = b.text.get_slice("  ", 1)
 			b.alignment = HORIZONTAL_ALIGNMENT_CENTER
-		exit_btn.visible = false
 	buttons.add_child(continue_btn)
 	buttons.add_child(new_btn)
 	buttons.add_child(ai_btn)
@@ -735,6 +761,32 @@ func _build_ui() -> void:
 		cancel_btn.text = cancel_btn.text.get_slice("  ", 1)
 	confirm.add_child(confirm_row)
 	new_confirm = confirm
+
+	# Web Exit: "Saved. You can close this tab now." (full screen dim + centered panel)
+	exit_panel = ColorRect.new()
+	(exit_panel as ColorRect).color = Color(0, 0, 0, 0.75)
+	exit_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
+	exit_panel.visible = false
+	layer.add_child(exit_panel)
+	var exit_center := CenterContainer.new()
+	exit_center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	exit_panel.add_child(exit_center)
+	var exit_box := PanelContainer.new()
+	exit_box.add_theme_stylebox_override("panel", _panel_style(Color(0.12, 0.13, 0.16, 0.96), 10))
+	exit_center.add_child(exit_box)
+	var exit_items := VBoxContainer.new()
+	exit_items.add_theme_constant_override("separation", 14)
+	exit_box.add_child(exit_items)
+	var saved_label := Label.new()
+	saved_label.text = "Saved. You can close this tab now."
+	saved_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	saved_label.add_theme_font_size_override("font_size", 22)
+	exit_items.add_child(saved_label)
+	var back_btn := Button.new()
+	back_btn.text = "Back to Mindblocks"
+	back_btn.custom_minimum_size = Vector2(200, 40)
+	back_btn.pressed.connect(_leave_exit_screen)
+	exit_items.add_child(back_btn)
 	menu_box.add_child(confirm)
 
 	_build_ai_panel(layer)
@@ -860,13 +912,38 @@ func _panel_style(bg: Color, radius: int) -> StyleBoxFlat:
 
 # --- Per frame --------------------------------------------------------------
 
+## Options for checking performance, from the command line
+## (`godot --path . -- --perf --nomsaa`) or the web page's address (`?perf&nomsaa`):
+## --perf prints frame rate and draw calls every 2 s; --nomsaa turns antialiasing off.
+func _debug_flag(name: String) -> bool:
+	if OS.has_feature("web"):
+		return str(JavaScriptBridge.eval("location.search")).contains(name)
+	return OS.get_cmdline_user_args().has("--" + name)
+
+
+var _perf_timer := 0.0
+func _print_perf(delta: float) -> void:
+	_perf_timer += delta
+	if _perf_timer < 2.0:
+		return
+	_perf_timer = 0.0
+	print("PERF fps=%d draw_calls=%d objects=%d primitives=%d" % [
+		Performance.get_monitor(Performance.TIME_FPS),
+		Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
+		Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME),
+		Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)])
+
+
 func _process(delta: float) -> void:
+	if _perf_on:
+		_print_perf(delta)
 	if OS.has_feature("web"):
 		var captured := _mouse_captured()
 		if was_captured and not captured and not paused and not _panel_open():
 			_set_paused(true)
 		was_captured = captured
 	_keep_camera_outside_notes()
+	_keep_camera_in_room()
 	_update_depth_fx(delta)
 
 	if dragging:
@@ -875,6 +952,7 @@ func _process(delta: float) -> void:
 			dragging.global_position = held
 			drag_moved = true
 	_update_follow()
+	_collide_notes()
 
 	rig.input_blocked = _panel_open() or paused
 	crosshair.visible = _mouse_captured()
@@ -912,6 +990,47 @@ func _keep_camera_outside_notes() -> void:
 			var push := Vector3.ZERO
 			push[axis] = (h - absf(p[axis])) * (1.0 if p[axis] >= 0.0 else -1.0)
 			rig.position += t.basis * push
+
+
+## Keeps the camera inside the room (flying, orbiting or zooming can't take it
+## through a wall, the floor or the ceiling).
+## Keeps the camera inside the room and out of the furniture, sliding along
+## whatever it flies into.
+func _keep_camera_in_room() -> void:
+	var p := camera.global_position
+	var out: Vector3 = RoomScript.push_out(p, ROOM_MARGIN)["pos"]
+	if not out.is_equal_approx(p):
+		rig.position += out - p
+
+
+## Keeps every note inside the room and out of the furniture. A note pressed
+## against something (carried into it, or part of a stack pushed into it)
+## flattens against it, by how far it's pushed in, and springs back once it's
+## free. Starting to press something you're moving clicks softly.
+func _collide_notes() -> void:
+	var moving := _moving_note()
+	for v in notes.values():
+		var n: NoteScript = v
+		var hit := RoomScript.push_out(n.global_position, NOTE_RADIUS)
+		var depth: float = hit["depth"]
+		var normal: Vector3 = hit["normal"]
+		if depth > 0.0001:
+			n.global_position = hit["pos"]
+		# A stack block on springs: how far its target place is inside the obstacle.
+		if not follow.is_empty() and follow["offsets"].has(n):
+			var target: Vector3 = (follow["anchor"] as NoteScript).global_position + follow["offsets"][n]
+			var t_hit := RoomScript.push_out(target, NOTE_RADIUS)
+			if t_hit["depth"] > depth:
+				depth = t_hit["depth"]
+				normal = t_hit["normal"]
+		var pressed := depth > SQUASH_START
+		n.set_squash(normal, (depth - SQUASH_START) / SQUASH_FULL if pressed else 0.0)
+		if pressed and n == moving and not pressing.has(n):
+			_click(0.6)
+		if pressed:
+			pressing[n] = true
+		else:
+			pressing.erase(n)
 
 
 ## Focus on the note being edited, carried or aimed at; darken notes behind it.
@@ -979,7 +1098,8 @@ func _redraw_guides() -> void:
 	for v in notes.values():
 		var n: NoteScript = v
 		var p := n.global_position
-		var foot := Vector3(p.x, FLOOR_Y, p.z)
+		# Lands on whatever is right below: the desk, the bed, the bookshelf or the floor.
+		var foot := Vector3(p.x, RoomScript.surface_below(p) + 0.05, p.z)
 		var ring_col := Color(n.color, 0.6)
 		guides_mesh.surface_set_color(line_col)
 		guides_mesh.surface_add_vertex(p)
@@ -998,6 +1118,11 @@ func _redraw_guides() -> void:
 ## Runs before the GUI, so it can close the editor on Esc / Ctrl+Enter / outside click,
 ## and toggle the pause menu on Esc otherwise.
 func _input(event: InputEvent) -> void:
+	if exit_panel.visible:
+		if event is InputEventKey and event.pressed and (event as InputEventKey).keycode == KEY_ESCAPE:
+			_leave_exit_screen()
+			get_viewport().set_input_as_handled()
+		return
 	if ai_panel.visible:
 		if event is InputEventKey and event.pressed and not event.echo:
 			var ak := event as InputEventKey
@@ -1296,7 +1421,6 @@ func _on_key(e: InputEventKey) -> void:
 				rig.focus(selected.global_position)
 		KEY_G:
 			guides.visible = not guides.visible
-			grid.visible = guides.visible
 		KEY_B:
 			_open_ai_panel("edit" if e.shift_pressed else "breakdown")
 		KEY_O:
@@ -1651,7 +1775,8 @@ func _following(n: NoteScript) -> bool:
 
 
 ## How far to shift the stack (anchor at `anchor_pos`, the rest at their
-## offsets) so none of its blocks end up too close to a block outside it.
+## offsets) so none of its blocks end up too close to a block outside it, or
+## inside a wall or a piece of furniture.
 func _stack_clearance(anchor_pos: Vector3) -> Vector3:
 	var a: NoteScript = follow["anchor"]
 	var members: Array[Vector3] = [Vector3.ZERO]
@@ -1674,6 +1799,11 @@ func _stack_clearance(anchor_pos: Vector3) -> Vector3:
 				if dist < 0.01:
 					away = camera.global_transform.basis.x
 				shift += away.normalized() * (SPACING - dist)
+				moved = true
+			# ...and out of the walls and furniture, so it doesn't settle pressed into them.
+			var room_hit := RoomScript.push_out(anchor_pos + shift + off, NOTE_RADIUS)
+			if room_hit["depth"] > 0.001:
+				shift += room_hit["pos"] - (anchor_pos + shift + off)
 				moved = true
 		if not moved:
 			break
@@ -2358,6 +2488,8 @@ func _arrange_targets() -> Dictionary:
 	# One radius: every stack fits in view, keeps its own blocks off the viewer,
 	# and clears its neighbours by ARRANGE_GAP (chord between middles >= both reaches + gap).
 	var radius := ARRANGE_MIN_DIST
+	var apart := 0.0  # smallest radius at which neighbours keep ARRANGE_GAP apart
+	var widest := 0.0
 	for k in count:
 		var st: Dictionary = stacks[k]
 		radius = maxf(radius, st["reach"] / tan(hfov * 0.5))
@@ -2365,7 +2497,13 @@ func _arrange_targets() -> Dictionary:
 		radius = maxf(radius, st["reach"] + ARRANGE_MIN_DIST * 0.5)
 		if count > 1:
 			var next: Dictionary = stacks[(k + 1) % count]
-			radius = maxf(radius, (st["reach"] + next["reach"] + ARRANGE_GAP) / (2.0 * sin(step * 0.5)))
+			apart = maxf(apart, (st["reach"] + next["reach"] + ARRANGE_GAP) / (2.0 * sin(step * 0.5)))
+		widest = maxf(widest, st["reach"])
+	# Stay inside the room if the stacks still keep apart there; never let them overlap.
+	var lo := RoomScript.world_min()
+	var hi := RoomScript.world_max()
+	var to_wall := minf(minf(eye.x - lo.x, hi.x - eye.x), minf(eye.z - lo.z, hi.z - eye.z)) - widest
+	radius = maxf(minf(radius, to_wall), apart)
 	var targets := {}  # block -> [place, rotation]
 	for k in count:
 		var st: Dictionary = stacks[k]
@@ -2403,9 +2541,24 @@ func _clear_space() -> Array:
 
 
 ## Pause menu Exit: saves and quits.
+## In a browser a page can't close its own tab, so Exit saves, leaves
+## fullscreen, frees the mouse and says the tab can be closed.
 func _exit() -> void:
 	_save()
-	get_tree().quit()
+	if not OS.has_feature("web"):
+		get_tree().quit()
+		return
+	if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN:
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+	pause_panel.visible = false
+	exit_panel.visible = true
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+## Web Exit screen: back to the pause menu.
+func _leave_exit_screen() -> void:
+	exit_panel.visible = false
+	_set_paused(true)
 
 
 ## Clears every block and link and starts over with the first-run blocks and
@@ -3371,6 +3524,7 @@ func _drop_toast(l: Label) -> void:
 ## Paused: cursor is free, the menu is up, and the 3D view ignores input.
 func _set_paused(on: bool) -> void:
 	paused = on
+	Engine.max_fps = PAUSED_FPS if on else MAX_FPS
 	pause_panel.visible = on
 	_show_new_confirm(false)
 	if on:
@@ -3473,3 +3627,8 @@ func _notification(what: int) -> void:
 	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT and pause_panel \
 			and not paused and not _panel_open():
 		_set_paused(true)  # alt-tabbed away: free the cursor
+	# Frame rate: nobody's looking while the window is in the background, so save the battery.
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		Engine.max_fps = BACKGROUND_FPS
+	elif what == NOTIFICATION_APPLICATION_FOCUS_IN:
+		Engine.max_fps = PAUSED_FPS if paused else MAX_FPS

@@ -50,7 +50,7 @@ On macOS, use Cmd wherever this says Ctrl (Cmd+Z, Cmd+C, Cmd+Enter…); the in-a
 | Orbit | Right-drag |
 | Pan | Middle-drag or Shift+right-drag |
 | Zoom | Scroll while orbiting (right-drag); scrolling while just flying does nothing |
-| Fly | W A S D, Q / E for down / up (18 units/s), Shift = much faster (43) |
+| Fly | W A S D, Q / E for down / up (18 units/s), Shift = much faster (60); holding a direction speeds up to 2.5× over 1.5 s |
 | Fly up / down | Space or E / Q |
 | Arrange notes around me | O, or Esc → Arrange notes around me: every stack (blocks connected by links; a lone block counts as one) goes on one circle round you at eye level, equally spaced (360° / number of stacks), the first straight ahead, in the order they already were around you. The circle is big enough for each stack to be seen whole and for neighbours to stay apart. Long stacks are turned so you see their full width. Doing it again without moving changes nothing. You stay where you are; Ctrl+Z puts everything back |
 | Toggle floor guides | G |
@@ -104,7 +104,8 @@ so hosts don't need special headers). To put it on itch.io:
 
 In the browser, click Continue to grab the mouse; Esc (which the browser uses
 to free the mouse) brings the menu back. The menu has no emoji there (browsers
-give Godot no emoji font) and no Exit. Text uses the bundled Noto Sans with
+give Godot no emoji font), and since a page can't close its own tab, Exit
+saves, leaves fullscreen and shows "Saved. You can close this tab now." Text uses the bundled Noto Sans with
 distance-field rendering, which stays crisp at any size in the browser. Notes are saved in that browser. The AI
 features need each visitor's own Anthropic API key, which also stays in their
 browser.
@@ -198,6 +199,7 @@ main.tscn            one Node3D with main.gd; everything else is built in code
 scripts/main.gd      environment, input, picking, dragging, links, editor UI, AI breakdown, save/load
 scripts/note.gd      one note: a cube with its text on the face toward you, outline, done/failed marks
 scripts/camera_rig.gd orbit / pan / zoom / fly camera
+scripts/room.gd      the home-office room the notes float in
 fonts/               Noto Sans (SIL Open Font License, see NotoSans-LICENSE.txt), the web build's UI font
 ```
 
@@ -237,13 +239,42 @@ A few design decisions worth knowing before you change things:
   `_fit_font_size()` binary-searches the largest font size at which the
   wrapped text fits (without splitting words), so one word is huge and a
   paragraph is small.
-- **Starry sky.** The background is a small sky shader (`SKY_SHADER`): the
-  old dark background color with a sparse sprinkle of dim stars (`SKY_STAR_AMOUNT`, `SKY_STAR_BRIGHTNESS`) hashed onto a 3D grid of directions,
-  so they're spread evenly over the whole sphere with no texture files, and
-  they stay put as you look around. Lighting doesn't come from the sky, so
-  blocks look the same as before.
-- **Depth guides.** A faint floor grid, plus a drop line and a colored ring
-  on the floor under every note, show each note's height and floor position
+- **A giant home office; you're the size of a fly.** `scripts/room.gd` builds a
+  cozy room from plain boxes, cylinders and spheres (no asset files), laid out
+  in ~10 cm "room units" and shown `SCALE` (5) times bigger around you. A block
+  is a sugar cube, the laptop (with keycaps) is about 15 blocks wide, the desk
+  is a big plateau, and the lamp a tower. Also: wooden floor and rug, a mug, an
+  office chair, a bookshelf, a bed, plants, a door, pictures and a wall clock,
+  plus a few glowing dust motes drifting in the lamp light. You start hovering
+  just above the desk, with the welcome stacks floating over the laptop and
+  lamp. The camera can't leave the room, and Arrange notes around me keeps
+  stacks inside it when they fit. The desk lamp and ceiling lamp are the only
+  extra lights, with no shadows, so note text stays clear; a faint warm haze
+  softens the far side of the room.
+- **Nothing passes through the furniture.** The room lists its solid parts as
+  rough boxes (`SOLIDS`). Every frame the camera and every note are pushed out
+  of them and kept inside the walls, the shortest way out, so flying or
+  dragging along a surface slides along it. A note pressed against something
+  (carried into it, or part of a stack pushed into it) flattens against it, by
+  how hard it's pushed, and springs back with a little wobble once it's free;
+  the first touch while moving clicks softly. Only the look is squashed, never
+  the saved position. A stack let go against something is shifted clear of it.
+- **Flying across it.** Holding a direction speeds up over 1.5 s to 2.5 times
+  the speed (normally 18 → 45 units/s, with Shift 60 → 150), so crossing the
+  room takes a few seconds; letting go resets it.
+- **Kept light on the GPU.** The room's ~300 parts are merged into one mesh per
+  color at startup (about 50 draw calls in all instead of 120), its materials
+  are lit per vertex (they're flat colors, so it looks the same), and it has
+  only one extra light, the desk lamp. The frame rate is capped at 60, 30 while
+  paused and 10 while the window is in the background. To check on a machine:
+  `godot --path . -- --perf` prints frame rate and draw calls every 2 s, and
+  `--nomsaa` turns antialiasing off (on the web: `?perf&nomsaa` in the address).
+- **Starry night outside.** The window has no glass: the scene's background
+  shows through it, a small sky shader (`SKY_SHADER`) with a sparse sprinkle of
+  dim stars (`SKY_STAR_AMOUNT`, `SKY_STAR_BRIGHTNESS`).
+- **Depth guides.** A drop line and a colored ring under every note, landing on
+  whatever is right below it (the desk, the bed, the top of the bookshelf, or
+  the floor), show each note's height and floor position
   at a glance (G toggles them). Links are camera-facing ribbons with a fixed
   world width, so nearer links look thicker, and they fade with distance.
 - **The camera can't enter cubes.** After the camera moves each frame,
